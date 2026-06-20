@@ -47,12 +47,10 @@ mackerel_micro_start()
 {
     echo "Starting ${name}."
     
-    # stdout/stderr の syslog 転送は daemon(8) のネイティブ機能 (-S) に完全委譲する。
-    # シェルやパイプを排除することで、PIDファイルに正真正銘の perl のPIDが書き込まれ、
-    # 孤児プロセス問題（stopが効かないバグ）を完全に解消する。
-    # ※ -o ではなく -S (syslog) を使うため、ローテート時の fd 掴みっぱなし問題も起きない。
+    # -s info から -s notice に変更（または -s を省略するとデフォルトで notice になります）
+    # これにより FreeBSD の標準的な syslog フィルタを通過し、/var/log/messages に書き込まれます。
     
-    /usr/sbin/daemon -f -S -T mackerel-micro -l daemon -s info -p "${pidfile}" \
+    /usr/sbin/daemon -f -S -T mackerel-micro -l daemon -s notice -p "${pidfile}" \
         /usr/bin/env perl ${command} ${mackerel_micro_conf} ${mackerel_micro_flags}
 }
 
