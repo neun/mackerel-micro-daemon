@@ -46,13 +46,14 @@ mackerel_micro_prestart()
 mackerel_micro_start()
 {
     echo "Starting ${name}."
-    # stdout/stderr を logger にパイプし syslogd へ渡す。
-    # daemon(8) の -o オプションを使わないことで、newsyslog によるローテート時の
-    # fd 掴みっぱなし問題を回避する。ローテートは syslogd/newsyslog に完全委譲。
-    /usr/sbin/daemon -f -p "${pidfile}" \
-        /bin/sh -c \
-        "/usr/bin/env perl ${command} ${mackerel_micro_conf} ${mackerel_micro_flags} 2>&1 \
-            | /usr/bin/logger -t mackerel-micro -p daemon.info"
+    
+    # stdout/stderr の syslog 転送は daemon(8) のネイティブ機能 (-S) に完全委譲する。
+    # シェルやパイプを排除することで、PIDファイルに正真正銘の perl のPIDが書き込まれ、
+    # 孤児プロセス問題（stopが効かないバグ）を完全に解消する。
+    # ※ -o ではなく -S (syslog) を使うため、ローテート時の fd 掴みっぱなし問題も起きない。
+    
+    /usr/sbin/daemon -f -S -T mackerel-micro -l daemon -s info -p "${pidfile}" \
+        /usr/bin/env perl ${command} ${mackerel_micro_conf} ${mackerel_micro_flags}
 }
 
 mackerel_micro_stop()
