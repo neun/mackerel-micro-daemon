@@ -276,7 +276,8 @@ my @prev_cp_time = get_cp_time();
 my $loop_count   = 0;
 
 while (1) {
-    my $now = time();
+    my $loop_start = time();
+    my $now = $loop_start;
     my @metrics;
     $loop_count++;
 
@@ -411,5 +412,12 @@ while (1) {
         }
     }
 
-    sleep(60);
+    # --- [8] elapsed time を差し引いて正確に60秒間隔を維持 ---
+    my $elapsed  = time() - $loop_start;
+    my $sleep_sec = 60 - $elapsed;
+    if ($sleep_sec > 0) {
+        sleep($sleep_sec);
+    } else {
+        warn "Warning: loop took ${elapsed}s (>60s), skipping sleep.";
+    }
 }
