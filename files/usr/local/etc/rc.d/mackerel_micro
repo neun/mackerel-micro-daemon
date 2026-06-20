@@ -23,7 +23,7 @@ desc="Mackerel Micro Daemon - lightweight Mackerel agent for FreeBSD"
 : ${mackerel_micro_flags:=""}
 
 command="/usr/local/sbin/mackerel-micro-daemon"
-command_interpreter="/usr/bin/env perl"
+command_interpreter="/usr/local/bin/perl"
 pidfile="/var/run/${name}.pid"
 # ログは logger 経由で syslogd に委譲する。
 # newsyslog による世代管理・ローテートは /var/log/messages の既存ルールがそのまま適用される。
