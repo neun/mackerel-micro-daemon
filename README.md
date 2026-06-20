@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: FreeBSD](https://img.shields.io/badge/Platform-FreeBSD-red.svg)](https://www.freebsd.org/)
 
-**mackerel-micro-daemon** は、[Mackerel](https://mackerel.io/) への監視メトリクス送信を行う、FreeBSD 専用の超軽量非公式エージェントです。
+**mackerel-micro-daemon** は、[Mackerel](https://ja.mackerel.io/) への監視メトリクス送信を行う、FreeBSD 専用の超軽量非公式エージェントです。
 
 外部 CPAN モジュール・curl・jq は不要。`perl5` と FreeBSD に標準搭載の `openssl` のみで動作します。
 
@@ -16,7 +16,7 @@
 > **Use at your own risk.**
 > このソフトウェアは現状のまま（AS IS）提供されます。動作・安全性・データの正確性について、作者はいかなる保証も行いません。
 
-- **非公式ツールです。** このプロジェクトは [Mackerel](https://mackerel.io/)（株式会社はてな様）の公式ツールではありません。株式会社はてな様および Mackerel 開発チーム様とは一切関係がありません。
+- **非公式ツールです。** このプロジェクトは [Mackerel](https://ja.mackerel.io/)（株式会社はてな様）の公式ツールではありません。株式会社はてな様および Mackerel 開発チーム様とは一切関係がありません。
 - **Mackerel API の仕様変更により予告なく動作しなくなる可能性があります。** 本ツールは公開 API を独自に呼び出しており、Mackerel サーバ側の仕様変更・エンドポイント廃止・認証方式の変更等があった場合、使用できなくなることがあります。
 - **HTTP 通信は `openssl s_client` による手組み実装です。** TLS 証明書の厳格な検証・タイムアウト制御・リトライ処理は最小限であり、本番環境での利用は自己責任の上でご判断ください。
 - **API キーの管理は利用者の責任です。** 設定ファイル (`mackerel-micro.conf`) には Mackerel API キーが平文で記載されます。ファイルのパーミッション (`chmod 0600`) や公開リポジトリへのコミット防止 (`.gitignore`) は利用者自身が適切に管理してください。
@@ -86,7 +86,7 @@ MACKEREL_API_KEY=your_api_key_here
 #MACKEREL_ID_FILE=/var/db/mackerel-agent/id
 ```
 
-API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/-/apikeys) から取得できます。
+API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/<YOUR-ORG-NAME>?tab=apikeys) から取得できます。
 
 ### 設定値の優先順位
 
