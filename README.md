@@ -29,7 +29,7 @@
 - **最低限の依存** — `perl5` と FreeBSD 標準の `openssl` のみ。外部 CPAN モジュール・curl・jq は不要
 - **軽量** — 単一の `.pl` ファイル、メモリフットプリント最小
 - **自動登録** — ホスト ID ファイルがなければ Mackerel API に自動で新規登録
-- **乗り換え対応** — 既存の `mackerel-agent` の ID ファイル (`/var/db/mackerel-agent/id`) をそのまま引き継ぎ可能
+- **乗り換え対応** — 既存の `mackerel-agent` の ID ファイル (`/var/lib/mackerel-agent/id`) をそのまま引き継ぎ可能
 - **FreeBSD ネイティブ** — `sysrc` / `service` / `rc.d` に完全対応
 
 ## 収集するメトリクス
@@ -82,8 +82,8 @@ vi /usr/local/etc/mackerel-micro/mackerel-micro.conf
 # 必須: Mackerel の API キー
 MACKEREL_API_KEY=your_api_key_here
 
-# 任意: ホスト ID ファイルのパス (デフォルト: /var/db/mackerel-agent/id)
-#MACKEREL_ID_FILE=/var/db/mackerel-agent/id
+# 任意: ホスト ID ファイルのパス (デフォルト: /var/lib/mackerel-agent/id)
+#MACKEREL_ID_FILE=/var/lib/mackerel-agent/id
 ```
 
 API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/<YOUR-ORG-NAME>?tab=apikeys) から取得できます。
@@ -128,7 +128,7 @@ sudo sysrc mackerel_micro_enable=NO
 
 ## 既存の mackerel-agent からの乗り換え
 
-既存の `mackerel-agent` が生成した `/var/db/mackerel-agent/id` をそのまま使用するため、**Mackerel 上のホストが重複せず引き継ぎ**できます。
+既存の `mackerel-agent` が生成した `/var/lib/mackerel-agent/id` をそのまま使用するため、**Mackerel 上のホストが重複せず引き継ぎ**できます。
 
 ```sh
 # 既存エージェントを停止
@@ -159,7 +159,7 @@ sudo sh uninstall.sh
 /usr/local/etc/mackerel-micro/
   mackerel-micro.conf                        # 設定ファイル (要作成)
   mackerel-micro.conf.sample                 # 設定サンプル
-/var/db/mackerel-agent/id                    # ホスト ID (自動生成)
+/var/lib/mackerel-agent/id                    # ホスト ID (自動生成)
 /var/log/messages                            # ログ (syslogd 管理、tag: mackerel-micro)
 /var/run/mackerel_micro.pid                  # PID ファイル
 ```
