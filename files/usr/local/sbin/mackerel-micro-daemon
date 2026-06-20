@@ -182,9 +182,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.3.1",'
+            . '"agent-name":"mackerel-micro-daemon/v1.4",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.3.1",'
+            . '"agent-version":"1.4",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -206,7 +206,7 @@ sub metric_json {
 
 # ================================================================
 # 【PHASE 1】ホストID の確保
-#   IDファイルが存在して有効なID → そのまま使用
+#   IDファイルが存在して有効なID → isRetired チェック後に使用
 #   IDファイルが存在しない or 空  → Mackerel API に POST して新規登録
 # ================================================================
 my $host_id = '';
@@ -221,6 +221,23 @@ if (-f $ID_FILE && -s $ID_FILE) {
 if ($host_id) {
     # --- 既存ホスト: IDファイルから取得済み ---
     print "Loaded Host ID: $host_id\n";
+
+    # --- isRetired チェック: 退役済みホストへの送信を防止 ---
+    # 退役ホストにメトリクスを送り続けても無意味なため、起動時に必ず確認する。
+    # 自動再登録は行わない。意図せず課金対象ホストが増えるリスクを避けるため。
+    # 対処: Mackerel コンソールで退役を解除するか、$ID_FILE を削除して再起動する。
+    print "Checking host status on Mackerel...\n";
+    my (undef, $get_res) = send_https_request('GET', "/api/v0/hosts/$host_id", '');
+
+    if (!$get_res) {
+        die "[FATAL] Could not reach Mackerel API to verify host status.\n";
+    }
+    if ($get_res =~ /"isRetired"\s*:\s*true/) {
+        die "[FATAL] Host $host_id is retired on Mackerel.\n"
+          . "  To re-register as a new host, remove the ID file and restart:\n"
+          . "    rm $ID_FILE && service mackerel_micro start\n";
+    }
+    print "Host is active.\n";
 } else {
     # --- 新規ホスト: POST /api/v0/hosts で登録 ---
     print "Host ID not found. Registering as a new host...\n";
