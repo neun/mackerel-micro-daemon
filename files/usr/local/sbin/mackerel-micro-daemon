@@ -1,0 +1,415 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use IPC::Open2;
+use Time::HiRes qw(sleep);
+
+# =================================================================
+# mackerel-micro-daemon.pl
+# FreeBSD 標準機能 + Perl 標準モジュールのみ。外部CPANモジュール不要。
+# =================================================================
+
+# ----------------------------------------------------------------
+# 【STEP 0】設定ファイル / 環境変数からAPIキーを読み込む
+#
+# 優先順位:
+#   1. 環境変数 (export や systemd の EnvironmentFile= で渡す場合)
+#   2. 設定ファイル (デフォルト: /usr/local/etc/mackerel-micro/mackerel-micro.conf)
+#      コマンドライン引数で別パスを指定可: perl mackerel-micro-daemon.pl /path/to/conf
+#
+# 設定ファイルの書式 (記載例):
+#   MACKEREL_API_KEY=your_api_key_here
+#   MACKEREL_ID_FILE=/var/db/mackerel-agent/id   # 省略時は↑のデフォルト値
+#   # で始まる行と空行は無視されます
+# ----------------------------------------------------------------
+my $CONF_FILE = $ARGV[0] // '/usr/local/etc/mackerel-micro/mackerel-micro.conf';
+
+sub load_conf {
+    my ($path) = @_;
+    return unless -f $path && -r $path;
+    open(my $fh, '<', $path) or do { warn "Cannot open $path: $!\n"; return };
+    while (my $line = <$fh>) {
+        chomp $line;
+        next if $line =~ /^\s*#/ || $line =~ /^\s*$/;    # コメント・空行スキップ
+        if ($line =~ /^\s*([A-Z_][A-Z0-9_]*)\s*=\s*"?([^"]*?)"?\s*$/) {
+            $ENV{$1} //= $2;    # 環境変数が既にある場合は上書きしない(優先順位1を守る)
+        }
+    }
+    close $fh;
+}
+
+load_conf($CONF_FILE);
+
+my $API_KEY = $ENV{MACKEREL_API_KEY}
+    or die "[FATAL] MACKEREL_API_KEY が設定されていません。\n"
+         . "  環境変数 MACKEREL_API_KEY をセットするか、\n"
+         . "  設定ファイル $CONF_FILE に MACKEREL_API_KEY=... を記載してください。\n";
+
+# ----------------------------------------------------------------
+# 定数 (confで上書き可能なものは %ENV 経由で解決)
+# ----------------------------------------------------------------
+my $API_HOST = 'api.mackerelio.com';
+# 既存の mackerel-agent からの乗り換えをそのままサポートするためデフォルトを合わせる。
+# confに MACKEREL_ID_FILE=/path/to/id を書けば任意のパスに変更可能。
+my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/db/mackerel-agent/id';
+
+my @MEM_KEYS = qw(
+    vm.stats.vm.v_page_size
+    vm.stats.vm.v_page_count
+    vm.stats.vm.v_free_count
+    vm.stats.vm.v_active_count
+    vm.stats.vm.v_inactive_count
+    vm.stats.vm.v_wire_count
+    vm.stats.vm.v_laundry_count
+);
+
+print "Mackerel Micro Daemon Initializing... (PID: $$)\n";
+
+# ================================================================
+# サブルーチン群
+# ================================================================
+
+# ----------------------------------------------------------------
+# sysctl を1コマンドにまとめ "キー: 値" 形式でパース(防弾仕様)
+# -n を使わないことで、キー抜け時の誤マッピングを完全防止。
+# ----------------------------------------------------------------
+sub sysctl_multi {
+    my @keys = @_;
+    my $out = `sysctl @keys 2>/dev/null`;
+    my %h;
+    for my $line (split(/\n/, $out)) {
+        if ($line =~ /^([^:]+):\s*(.*)$/) {
+            $h{$1} = $2;
+        }
+    }
+    return %h;
+}
+
+# ----------------------------------------------------------------
+# HTTPS送信ヘルパー (PUT / POST 共通、タイムアウト保護付き)
+# open2 で openssl s_client に直接書き込む → シェルメタ文字に依存しない
+# ----------------------------------------------------------------
+sub send_https_request {
+    my ($method, $path, $json) = @_;
+
+    my $body = $json // '';
+    my $request = "${method} ${path} HTTP/1.1\r\n"
+                . "Host: ${API_HOST}\r\n"
+                . "X-Api-Key: ${API_KEY}\r\n"
+                . "Content-Type: application/json\r\n"
+                . "Content-Length: " . length($body) . "\r\n"
+                . "Connection: close\r\n\r\n"
+                . $body;
+
+    my ($success, $response) = (0, '');
+
+    eval {
+        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        alarm(10);
+
+        my ($chld_out, $chld_in);
+        my $pid = open2($chld_out, $chld_in,
+            "openssl s_client -connect ${API_HOST}:443 -quiet 2>/dev/null");
+        print $chld_in $request;
+        close $chld_in;
+
+        $response = do { local $/; <$chld_out> };
+        close $chld_out;
+        waitpid($pid, 0);
+        alarm(0);
+
+        $success = 1 if $response && $response =~ m{HTTP/1\.1 200 };
+    };
+    alarm(0);
+
+    if ($@) {
+        warn "send_https_request: $@";
+        return (0, '');
+    }
+    return ($success, $response);
+}
+
+# ----------------------------------------------------------------
+# kern.cp_time を取得 (user, nice, system, interrupt, idle)
+# ----------------------------------------------------------------
+sub get_cp_time {
+    my $raw = `sysctl -n kern.cp_time`;
+    return split(/\s+/, $raw);
+}
+
+# ----------------------------------------------------------------
+# ファイルシステム情報をJSON文字列に変換
+# ----------------------------------------------------------------
+sub fs_meta_to_json {
+    my (%fs) = @_;
+    my @entries;
+    for my $dev (sort keys %fs) {
+        my $info = $fs{$dev};
+        (my $dev_esc = $dev) =~ s/([\\\"])/\\$1/g;
+        push @entries, sprintf(
+            '"%s":{"kb_size":%d,"kb_used":%d,"kb_available":%d,"percent_used":"%d%%","mount":"%s"}',
+            $dev_esc,
+            $info->{kb_size}, $info->{kb_used}, $info->{kb_available},
+            $info->{percent_used}, $info->{mount}
+        );
+    }
+    return "{" . join(",", @entries) . "}";
+}
+
+# ----------------------------------------------------------------
+# ホストスペック JSON を組み立てる (POST 新規登録 / PUT 更新 共通)
+# ----------------------------------------------------------------
+sub build_spec_json {
+    my (%fs) = @_;
+
+    my $hostname = `hostname`; chomp $hostname;
+    my $arch     = `uname -p`; chomp $arch;
+    my $os_rel   = `uname -r`; chomp $os_rel;
+
+    my %sc       = sysctl_multi(qw(hw.model hw.ncpu hw.physmem));
+    my $cpu_model = $sc{'hw.model'} // 'unknown'; $cpu_model =~ s/^\s+|\s+$//g;
+    my $cpu_cores = ($sc{'hw.ncpu'} // 1) + 0;
+    my $phys_mem  = ($sc{'hw.physmem'} // 0) + 0;
+    my $mem_kb    = int($phys_mem / 1024) . "kB";
+
+    # JSON文字列内のダブルクォートをエスケープ
+    (my $cpu_model_esc = $cpu_model) =~ s/([\\\"])/\\$1/g;
+    (my $hostname_esc  = $hostname)  =~ s/([\\\"])/\\$1/g;
+
+    my @cpu_array = map { sprintf('{"model_name":"%s","cores":"1"}', $cpu_model_esc) } (1 .. $cpu_cores);
+    my $cpu_json  = "[" . join(",", @cpu_array) . "]";
+    my $fs_json   = fs_meta_to_json(%fs);
+
+    return sprintf(
+        '{"name":"%s","meta":{'
+            . '"agent-name":"mackerel-micro-daemon/v1.3",'
+            . '"agent-revision":"ops",'
+            . '"agent-version":"1.3.0",'
+            . '"cpu":%s,'
+            . '"filesystem":%s,'
+            . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
+            . '"memory":{"total":"%s"}'
+        . '},'
+        . '"interfaces":[],"roleFullnames":[],"checks":[]}',
+        $hostname_esc, $cpu_json, $fs_json, $arch, $os_rel, $mem_kb
+    );
+}
+
+# ----------------------------------------------------------------
+# メトリック1件分のJSON文字列を生成
+# ----------------------------------------------------------------
+sub metric_json {
+    my ($host_id, $name, $time, $value) = @_;
+    return sprintf('{"hostId":"%s","name":"%s","time":%d,"value":%s}',
+        $host_id, $name, $time, $value);
+}
+
+# ================================================================
+# 【PHASE 1】ホストID の確保
+#   IDファイルが存在して有効なID → そのまま使用
+#   IDファイルが存在しない or 空  → Mackerel API に POST して新規登録
+# ================================================================
+my $host_id = '';
+
+# IDファイルが存在すれば読み込む
+if (-f $ID_FILE && -s $ID_FILE) {
+    open(my $fh, '<', $ID_FILE) or die "Cannot open $ID_FILE: $!\n";
+    $host_id = <$fh>; chomp $host_id; close $fh;
+    $host_id =~ s/\s+//g;
+}
+
+if ($host_id) {
+    # --- 既存ホスト: IDファイルから取得済み ---
+    print "Loaded Host ID: $host_id\n";
+} else {
+    # --- 新規ホスト: POST /api/v0/hosts で登録 ---
+    print "Host ID not found. Registering as a new host...\n";
+
+    # df -k を取得しておく(spec JSON にも使う)
+    my %fs_for_register;
+    for my $line (`df -k`) {
+        next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
+        if ($line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/) {
+            $fs_for_register{$1} = {
+                kb_size      => $2 + 0,
+                kb_used      => $3 + 0,
+                kb_available => $4 + 0,
+                percent_used => $5 + 0,
+                mount        => $6,
+            };
+        }
+    }
+
+    my $spec_json = build_spec_json(%fs_for_register);
+    my ($ok, $res) = send_https_request('POST', '/api/v0/hosts', $spec_json);
+
+    if ($res && $res =~ /"id"\s*:\s*"([^"]+)"/) {
+        $host_id = $1;
+
+        # IDファイルのディレクトリを自動作成
+        (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
+        if ($id_dir && ! -d $id_dir) {
+            mkdir $id_dir or die "Cannot create directory $id_dir: $!\n";
+        }
+
+        open(my $fh, '>', $ID_FILE) or die "Cannot write $ID_FILE: $!\n";
+        print $fh $host_id; close $fh;
+
+        print "New host registered! Host ID: $host_id (saved to $ID_FILE)\n";
+    } else {
+        die "[FATAL] Host registration failed. API response:\n$res\n";
+    }
+}
+
+# ----------------------------------------------------------------
+# ループ外で固定値をキャッシュ (fork削減)
+# ----------------------------------------------------------------
+my $core_count = (`sysctl -n hw.ncpu` + 0) || 1;
+
+# ================================================================
+# 【PHASE 2】定期メトリック送信ループ
+# ================================================================
+print "Starting metric loop. Interval: 60s\n";
+
+my %prev_net;
+my @prev_cp_time = get_cp_time();
+my $loop_count   = 0;
+
+while (1) {
+    my $now = time();
+    my @metrics;
+    $loop_count++;
+
+    # --- [1] CPU 利用率 ---
+    my @cp_time = get_cp_time();
+    if (@cp_time == 5 && @prev_cp_time == 5) {
+        my @delta          = map { $cp_time[$_] - $prev_cp_time[$_] } (0 .. 4);
+        my ($d_user, $d_nice, $d_sys, $d_intr, $d_idle) = @delta;
+        my $d_system_total = $d_sys + $d_intr;
+        my $total          = $d_user + $d_nice + $d_system_total + $d_idle;
+
+        if ($total > 0) {
+            my $scale = 100 * $core_count / $total;
+            push @metrics,
+                metric_json($host_id, "cpu.user.percentage",   $now, sprintf("%.2f", $d_user         * $scale)),
+                metric_json($host_id, "cpu.nice.percentage",   $now, sprintf("%.2f", $d_nice         * $scale)),
+                metric_json($host_id, "cpu.system.percentage", $now, sprintf("%.2f", $d_system_total * $scale)),
+                metric_json($host_id, "cpu.idle.percentage",   $now, sprintf("%.2f", $d_idle         * $scale));
+        }
+    }
+    @prev_cp_time = @cp_time;
+
+    # --- [2] メモリ (一括 sysctl) ---
+    my %sc         = sysctl_multi(@MEM_KEYS);
+    my $page_size  = ($sc{'vm.stats.vm.v_page_size'}      // 0) + 0;
+    my $page_count = ($sc{'vm.stats.vm.v_page_count'}     // 0) + 0;
+    my $free_cnt   = ($sc{'vm.stats.vm.v_free_count'}     // 0) + 0;
+    my $active_cnt = ($sc{'vm.stats.vm.v_active_count'}   // 0) + 0;
+    my $inact_cnt  = ($sc{'vm.stats.vm.v_inactive_count'} // 0) + 0;
+    my $wire_cnt   = ($sc{'vm.stats.vm.v_wire_count'}     // 0) + 0;
+    my $laund_cnt  = ($sc{'vm.stats.vm.v_laundry_count'}  // 0) + 0;
+
+    push @metrics,
+        metric_json($host_id, "memory.total",    $now, $page_count * $page_size),
+        metric_json($host_id, "memory.free",     $now, ($free_cnt + $inact_cnt + $laund_cnt) * $page_size),
+        metric_json($host_id, "memory.used",     $now, ($wire_cnt + $active_cnt)              * $page_size),
+        metric_json($host_id, "memory.active",   $now, $active_cnt * $page_size),
+        metric_json($host_id, "memory.inactive", $now, $inact_cnt  * $page_size);
+
+    # --- [3] ロードアベレージ ---
+    my $loadavg = `sysctl -n vm.loadavg`;
+    if ($loadavg =~ /([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)/) {
+        push @metrics,
+            metric_json($host_id, "loadavg1",  $now, $1),
+            metric_json($host_id, "loadavg5",  $now, $2),
+            metric_json($host_id, "loadavg15", $now, $3);
+    }
+
+    # --- [4] ネットワーク ---
+    my %current_net;
+    for my $line (`netstat -bni`) {
+        next if $line =~ /^(?:Name|lo|plip)/ || $line =~ /Link/;
+        my @cols = split(/\s+/, $line);
+        my ($iface, $rx, $tx) = ($cols[0], $cols[7], $cols[10]);
+        next unless defined($rx) && defined($tx) && $iface !~ /\*/;
+
+        $current_net{$iface} = { rx => $rx, tx => $tx };
+
+        my ($d_rx, $d_tx) = (0, 0);
+        if (exists $prev_net{$iface}) {
+            $d_rx = $rx - $prev_net{$iface}{rx} if $rx >= $prev_net{$iface}{rx};
+            $d_tx = $tx - $prev_net{$iface}{tx} if $tx >= $prev_net{$iface}{tx};
+        }
+        push @metrics,
+            metric_json($host_id, "interface.${iface}.rxBytes.delta", $now, $d_rx),
+            metric_json($host_id, "interface.${iface}.txBytes.delta", $now, $d_tx);
+    }
+
+    # --- [4.5] ディスク使用量 ---
+    my %fs_meta;
+    for my $line (`df -k`) {
+        next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
+        next unless $line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/;
+
+        my ($dev_raw, $total_kb, $used_kb, $avail_kb, $pct, $mount) = ($1,$2,$3,$4,$5,$6);
+        (my $dev_clean = $dev_raw) =~ s{^/dev/}{};
+        $dev_clean =~ s{[^\w\-\.]+}{-}g;
+        $dev_clean =~ s{^-|-$}{}g;
+
+        push @metrics,
+            metric_json($host_id, "filesystem.${dev_clean}.size", $now, $total_kb * 1024),
+            metric_json($host_id, "filesystem.${dev_clean}.used", $now, $used_kb  * 1024);
+
+        $fs_meta{$dev_raw} = {
+            kb_size      => $total_kb + 0,
+            kb_used      => $used_kb  + 0,
+            kb_available => $avail_kb + 0,
+            percent_used => $pct      + 0,
+            mount        => $mount,
+        };
+    }
+
+    # --- [4.6] ディスク I/O ---
+    if (open(my $fh, "-|", "iostat -x -c 2 -w 1")) {
+        my $capture = 0;
+        while (my $line = <$fh>) {
+            if ($line =~ /extended device statistics/i) {
+                $capture = 1; <$fh>; next;    # ヘッダースキップ
+            }
+            next unless $capture;
+            my @cols = split(/\s+/, $line);
+            next if @cols < 4;
+            my ($dev, $r_s, $w_s) = $cols[0] eq ''
+                ? @cols[1,2,3]
+                : @cols[0,1,2];
+            next unless $dev && $r_s =~ /^[\d\.]+$/;
+            push @metrics,
+                metric_json($host_id, "disk.$dev.reads.delta",  $now, $r_s),
+                metric_json($host_id, "disk.$dev.writes.delta", $now, $w_s);
+        }
+        close($fh);
+    }
+
+    # --- [5] メトリック POST ---
+    my $payload = "[" . join(',', @metrics) . "]";
+    my ($success, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
+    unless ($success) {
+        warn "Metric post failed (loop=$loop_count).\n";
+    }
+
+    # --- [6] ネットワークカウンタのコミット ---
+    %prev_net = %current_net if $success;
+
+    # --- [7] 初回のみホストスペック PUT ---
+    if ($loop_count == 1) {
+        my $spec_json = build_spec_json(%fs_meta);
+        my ($ok, $r)  = send_https_request('PUT', "/api/v0/hosts/$host_id", $spec_json);
+        if ($ok) {
+            print "Host spec updated successfully.\n";
+        } else {
+            warn "Warning: Host spec PUT failed.\n";
+        }
+    }
+
+    sleep(60);
+}

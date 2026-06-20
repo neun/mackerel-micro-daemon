@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# PROVIDE: mackerel_micro
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# Add the following lines to /etc/rc.conf to enable mackerel-micro-daemon:
+#
+#   mackerel_micro_enable="YES"
+#   mackerel_micro_conf="/usr/local/etc/mackerel-micro/mackerel-micro.conf"  # optional
+#   mackerel_micro_flags=""  # optional extra flags
+#
+
+. /etc/rc.subr
+
+name="mackerel_micro"
+rcvar="mackerel_micro_enable"
+desc="Mackerel Micro Daemon - lightweight Mackerel agent for FreeBSD"
+
+# デフォルト値
+: ${mackerel_micro_enable:="NO"}
+: ${mackerel_micro_conf:="/usr/local/etc/mackerel-micro/mackerel-micro.conf"}
+: ${mackerel_micro_flags:=""}
+
+command="/usr/local/sbin/mackerel-micro-daemon"
+command_interpreter="/usr/bin/env perl"
+pidfile="/var/run/${name}.pid"
+# ログは logger 経由で syslogd に委譲する。
+# newsyslog による世代管理・ローテートは /var/log/messages の既存ルールがそのまま適用される。
+# 確認コマンド例: grep 'mackerel-micro' /var/log/messages
+
+start_precmd="mackerel_micro_prestart"
+start_cmd="mackerel_micro_start"
+stop_cmd="mackerel_micro_stop"
+status_cmd="mackerel_micro_status"
+
+mackerel_micro_prestart()
+{
+    if [ ! -f "${mackerel_micro_conf}" ]; then
+        err 1 "Configuration file not found: ${mackerel_micro_conf}" \
+              "  Copy the sample: cp ${mackerel_micro_conf}.sample ${mackerel_micro_conf}" \
+              "  Then edit it to set MACKEREL_API_KEY."
+    fi
+}
+
+mackerel_micro_start()
+{
+    echo "Starting ${name}."
+    # stdout/stderr を logger にパイプし syslogd へ渡す。
+    # daemon(8) の -o オプションを使わないことで、newsyslog によるローテート時の
+    # fd 掴みっぱなし問題を回避する。ローテートは syslogd/newsyslog に完全委譲。
+    /usr/sbin/daemon -f -p "${pidfile}" \
+        /bin/sh -c \
+        "/usr/bin/env perl ${command} ${mackerel_micro_conf} ${mackerel_micro_flags} 2>&1 \
+            | /usr/bin/logger -t mackerel-micro -p daemon.info"
+}
+
+mackerel_micro_stop()
+{
+    if [ -f "${pidfile}" ]; then
+        pid=$(cat "${pidfile}")
+        echo "Stopping ${name} (PID: ${pid})."
+        kill "${pid}" && rm -f "${pidfile}"
+    else
+        echo "${name} is not running (no pidfile)."
+    fi
+}
+
+mackerel_micro_status()
+{
+    if [ -f "${pidfile}" ] && kill -0 "$(cat ${pidfile})" 2>/dev/null; then
+        echo "${name} is running as PID $(cat ${pidfile})."
+    else
+        echo "${name} is not running."
+        return 1
+    fi
+}
+
+load_rc_config $name
+run_rc_command "$1"

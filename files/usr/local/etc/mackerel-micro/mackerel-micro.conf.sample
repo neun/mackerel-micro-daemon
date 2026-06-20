@@ -1,0 +1,26 @@
+# =============================================================================
+# mackerel-micro-daemon 設定ファイル
+#
+# このファイルを mackerel-micro.conf という名前でコピーして使用してください:
+#   cp mackerel-micro.conf.sample mackerel-micro.conf
+#   vi mackerel-micro.conf
+#
+# 書式:
+#   KEY=value
+#   KEY="value with spaces"   # ダブルクォートも可
+#   # で始まる行はコメント、空行は無視されます
+#
+# 設定値は環境変数が最優先されます。
+# 同じキーを環境変数でも設定している場合、環境変数の値が使われます。
+# =============================================================================
+
+# [必須] Mackerel の API キー
+# Mackerel の組織設定ページから取得してください。
+# https://mackerel.io/orgs/<your-org>/apikeys
+MACKEREL_API_KEY=your_api_key_here
+
+# [任意] ホスト ID ファイルのパス
+# 既存の mackerel-agent からの乗り換え時はデフォルト値のままで
+# ホスト ID が引き継がれます。
+# デフォルト: /var/db/mackerel-agent/id
+#MACKEREL_ID_FILE=/var/db/mackerel-agent/id

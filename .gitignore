@@ -1,0 +1,15 @@
+# 設定ファイル (APIキーが含まれるため絶対にコミットしない)
+files/usr/local/etc/mackerel-micro/mackerel-micro.conf
+mackerel-micro.conf
+
+# ホスト ID ファイル
+*.id
+
+# ログ
+*.log
+
+# エディタ・OS 一時ファイル
+.DS_Store
+*~
+*.swp
+*.swo
