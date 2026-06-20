@@ -22,5 +22,5 @@ MACKEREL_API_KEY=your_api_key_here
 # [任意] ホスト ID ファイルのパス
 # 既存の mackerel-agent からの乗り換え時はデフォルト値のままで
 # ホスト ID が引き継がれます。
-# デフォルト: /var/db/mackerel-agent/id
-#MACKEREL_ID_FILE=/var/db/mackerel-agent/id
+# デフォルト: /var/lib/mackerel-agent/id
+#MACKEREL_ID_FILE=/var/lib/mackerel-agent/id

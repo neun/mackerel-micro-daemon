@@ -19,7 +19,7 @@ use Time::HiRes qw(sleep);
 #
 # 設定ファイルの書式 (記載例):
 #   MACKEREL_API_KEY=your_api_key_here
-#   MACKEREL_ID_FILE=/var/db/mackerel-agent/id   # 省略時は↑のデフォルト値
+#   MACKEREL_ID_FILE=/var/lib/mackerel-agent/id   # 省略時は↑のデフォルト値
 #   # で始まる行と空行は無視されます
 # ----------------------------------------------------------------
 my $CONF_FILE = $ARGV[0] // '/usr/local/etc/mackerel-micro/mackerel-micro.conf';
@@ -51,7 +51,7 @@ my $API_KEY = $ENV{MACKEREL_API_KEY}
 my $API_HOST = 'api.mackerelio.com';
 # 既存の mackerel-agent からの乗り換えをそのままサポートするためデフォルトを合わせる。
 # confに MACKEREL_ID_FILE=/path/to/id を書けば任意のパスに変更可能。
-my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/db/mackerel-agent/id';
+my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/lib/mackerel-agent/id';
 
 my @MEM_KEYS = qw(
     vm.stats.vm.v_page_size
