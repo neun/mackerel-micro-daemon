@@ -101,7 +101,7 @@ sub send_https_request {
                 . "Connection: close\r\n\r\n"
                 . $body;
 
-    my ($success, $response) = (0, '');
+    my ($status, $response) = (0, '');
 
     eval {
         local $SIG{ALRM} = sub { die "TIMEOUT\n" };
@@ -118,7 +118,7 @@ sub send_https_request {
         waitpid($pid, 0);
         alarm(0);
 
-        $success = 1 if $response && $response =~ m{HTTP/1\.1 200 };
+        $status = $1 + 0 if $response =~ m{HTTP/1\.1 (\d{3}) };
     };
     alarm(0);
 
@@ -126,7 +126,7 @@ sub send_https_request {
         warn "send_https_request: $@";
         return (0, '');
     }
-    return ($success, $response);
+    return ($status, $response);
 }
 
 # ----------------------------------------------------------------
@@ -182,9 +182,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.4",'
+            . '"agent-name":"mackerel-micro-daemon/v1.5",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.4",'
+            . '"agent-version":"1.5",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -223,21 +223,21 @@ if ($host_id) {
     print "Loaded Host ID: $host_id\n";
 
     # --- isRetired チェック: 退役済みホストへの送信を防止 ---
-    # 退役ホストにメトリクスを送り続けても無意味なため、起動時に必ず確認する。
     # 自動再登録は行わない。意図せず課金対象ホストが増えるリスクを避けるため。
     # 対処: Mackerel コンソールで退役を解除するか、$ID_FILE を削除して再起動する。
     print "Checking host status on Mackerel...\n";
-    my (undef, $get_res) = send_https_request('GET', "/api/v0/hosts/$host_id", '');
+    my ($get_code, $get_res) = send_https_request('GET', "/api/v0/hosts/$host_id", '');
 
-    if (!$get_res) {
-        die "[FATAL] Could not reach Mackerel API to verify host status.\n";
-    }
-    if ($get_res =~ /"isRetired"\s*:\s*true/) {
+    if    ($get_code == 0)   { die "[FATAL] Cannot reach Mackerel API.\n" }
+    elsif ($get_code == 404) { die "[FATAL] Host $host_id not found (404). $ID_FILE may be stale.\n"
+                                 . "  rm $ID_FILE && service mackerel_micro start\n" }
+    elsif ($get_code >= 500) { warn "[WARN] Mackerel server error (${get_code}) on startup check. Proceeding.\n" }
+    elsif ($get_code != 200) { die "[FATAL] Unexpected API response (${get_code}). Aborting.\n" }
+    elsif ($get_res =~ /"isRetired"\s*:\s*true/) {
         die "[FATAL] Host $host_id is retired on Mackerel.\n"
-          . "  To re-register as a new host, remove the ID file and restart:\n"
-          . "    rm $ID_FILE && service mackerel_micro start\n";
+          . "  rm $ID_FILE && service mackerel_micro start\n";
     }
-    print "Host is active.\n";
+    print "Host is active.\n" if $get_code == 200;
 } else {
     # --- 新規ホスト: POST /api/v0/hosts で登録 ---
     print "Host ID not found. Registering as a new host...\n";
@@ -258,24 +258,21 @@ if ($host_id) {
     }
 
     my $spec_json = build_spec_json(%fs_for_register);
-    my ($ok, $res) = send_https_request('POST', '/api/v0/hosts', $spec_json);
+    my ($post_code, $post_res) = send_https_request('POST', '/api/v0/hosts', $spec_json);
 
-    if ($res && $res =~ /"id"\s*:\s*"([^"]+)"/) {
-        $host_id = $1;
+    # 新規登録は200系以外すべて致命的エラー（IDが取れないまま続行できないため5xxもdie）
+    die "[FATAL] Host registration failed (${post_code}). API response:\n$post_res\n"
+        unless $post_code == 200 && $post_res =~ /"id"\s*:\s*"([^"]+)"/;
+    $host_id = $1;
 
-        # IDファイルのディレクトリを自動作成
-        (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
-        if ($id_dir && ! -d $id_dir) {
-            mkdir $id_dir or die "Cannot create directory $id_dir: $!\n";
-        }
+    # IDファイルのディレクトリを自動作成
+    (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
+    mkdir $id_dir or die "Cannot create directory $id_dir: $!\n"
+        if $id_dir && ! -d $id_dir;
 
-        open(my $fh, '>', $ID_FILE) or die "Cannot write $ID_FILE: $!\n";
-        print $fh $host_id; close $fh;
-
-        print "New host registered! Host ID: $host_id (saved to $ID_FILE)\n";
-    } else {
-        die "[FATAL] Host registration failed. API response:\n$res\n";
-    }
+    open(my $fh, '>', $ID_FILE) or die "Cannot write $ID_FILE: $!\n";
+    print $fh $host_id; close $fh;
+    print "New host registered! Host ID: $host_id (saved to $ID_FILE)\n";
 }
 
 # ----------------------------------------------------------------
@@ -410,23 +407,24 @@ while (1) {
 
     # --- [5] メトリック POST ---
     my $payload = "[" . join(',', @metrics) . "]";
-    my ($success, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
-    unless ($success) {
-        warn "Metric post failed (loop=$loop_count).\n";
-    }
+    my ($post_code, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
+
+    # 0 or 5xx: 一時的な不調 → warn してスキップ
+    # 3xx/4xx:  恒久的なエラー → die してデーモン終了
+    if    ($post_code == 200)                        { }  # 正常
+    elsif ($post_code == 0 || $post_code >= 500)     { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
+    else                                             { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
 
     # --- [6] ネットワークカウンタのコミット ---
-    %prev_net = %current_net if $success;
+    %prev_net = %current_net if $post_code == 200;
 
     # --- [7] 初回のみホストスペック PUT ---
     if ($loop_count == 1) {
-        my $spec_json = build_spec_json(%fs_meta);
-        my ($ok, $r)  = send_https_request('PUT', "/api/v0/hosts/$host_id", $spec_json);
-        if ($ok) {
-            print "Host spec updated successfully.\n";
-        } else {
-            warn "Warning: Host spec PUT failed.\n";
-        }
+        my $spec_json  = build_spec_json(%fs_meta);
+        my ($put_code) = send_https_request('PUT', "/api/v0/hosts/$host_id", $spec_json);
+        if    ($put_code == 200)                    { print "Host spec updated successfully.\n" }
+        elsif ($put_code == 0 || $put_code >= 500)  { warn "Host spec PUT failed (${put_code}). Will not retry.\n" }
+        else                                        { warn "Host spec PUT rejected (${put_code}). Continuing.\n" }
     }
 
     # --- [8] elapsed time を差し引いて正確に60秒間隔を維持 ---
