@@ -35,7 +35,7 @@ done
 
 warn "以下のファイルは手動で削除してください (データ保護のため自動削除しません):"
 warn "  設定ファイル : /usr/local/etc/mackerel-micro/mackerel-micro.conf"
-warn "  ホスト ID    : /var/db/mackerel-agent/id  (他のagentと共用の場合は特に注意)"
-warn "  ログ         : /var/log/mackerel-micro.log"
+warn "  ホスト ID    : /var/lib/mackerel-agent/id  (他のagentと共用の場合は特に注意)"
+warn "  ログ         : /var/log/messages 内 (syslog経由、grep mackerel-micro で検索可能)"
 
 printf "\n${GREEN}${BOLD}アンインストール完了。${RESET}\n"
