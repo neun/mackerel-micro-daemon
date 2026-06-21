@@ -58,9 +58,10 @@
 ## インストール
 
 ```sh
-git clone https://github.com/neun/mackerel-micro-daemon.git
-cd mackerel-micro-daemon
-sudo sh install.sh
+% git clone https://github.com/neun/mackerel-micro-daemon.git
+% cd mackerel-micro-daemon
+% su -m
+# sh install.sh
 ```
 
 インストーラが以下を自動で行います:
@@ -75,9 +76,10 @@ sudo sh install.sh
 ## 設定
 
 ```sh
-vi /usr/local/etc/mackerel-micro/mackerel-micro.conf
+% su -
+# vi /usr/local/etc/mackerel-micro/mackerel-micro.conf
 ```
-
+### 設定ファイルの中身について
 ```sh
 # 必須: Mackerel の API キー
 MACKEREL_API_KEY=your_api_key_here
@@ -126,33 +128,46 @@ Mackerelに送信したくない各項目を設定できます。
 
 設定ファイルの代わりに環境変数で渡すことも可能です
 (sh系: `export MACKEREL_API_KEY=...` / csh・tcsh系: `setenv MACKEREL_API_KEY ...`)
+これは同じシェルセッションから手動で `service mackerel_micro start` した場合のみ有効です。
+起動時 (rc.d 経由の自動起動) には適用されないため、通常は設定ファイルへの記載を推奨します。
 
 ---
 
 ## 起動・停止
 
+### 起動
+
 ```sh
-# 起動
-sudo service mackerel_micro start
+# service mackerel_micro start
+```
 
-# 停止
-sudo service mackerel_micro stop
+### 停止
 
-# 状態確認
-sudo service mackerel_micro status
+```sh
+# service mackerel_micro stop
+```
 
-# ログ確認 (syslog 経由で /var/log/messages に出力)
-grep mackerel-micro /var/log/messages
+### 状態確認
+```sh
+# service mackerel_micro status
+```
+
+### ログ確認 (syslog 経由で /var/log/messages に出力)
+```sh
+# grep mackerel-micro /var/log/messages
 ```
 
 ### 自動起動の有効化 / 無効化
 
-```sh
-# 有効化 (install.sh 実行済みなら不要)
-sudo sysrc mackerel_micro_enable=YES
+#### 有効化 (install.sh 実行済みなら不要)
 
-# 無効化
-sudo sysrc mackerel_micro_enable=NO
+```sh
+# sysrc mackerel_micro_enable=YES
+```
+
+#### 無効化
+```sh
+# sysrc mackerel_micro_enable=NO
 ```
 
 ---
@@ -161,13 +176,15 @@ sudo sysrc mackerel_micro_enable=NO
 
 既存の `mackerel-agent` が生成した `/var/lib/mackerel-agent/id` をそのまま使用するため、**Mackerel 上のホストが重複せず引き継ぎ**できます。
 
+### 既存エージェントを停止
 ```sh
-# 既存エージェントを停止
-sudo service mackerel-agent stop
-sudo sysrc mackerel_agent_enable=NO
+# service mackerel-agent stop
+# sysrc mackerel_agent_enable=NO
+```
 
-# mackerel-micro-daemon を起動
-sudo service mackerel_micro start
+### mackerel-micro-daemon を起動
+```sh
+# service mackerel_micro start
 ```
 
 ---
@@ -175,7 +192,7 @@ sudo service mackerel_micro start
 ## アンインストール
 
 ```sh
-sudo sh uninstall.sh
+# sh uninstall.sh
 ```
 
 設定ファイル・ホスト ID・ログは自動削除されません。手動で削除してください。
