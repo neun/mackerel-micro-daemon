@@ -53,6 +53,26 @@ my $API_HOST = 'api.mackerelio.com';
 # confに MACKEREL_ID_FILE=/path/to/id を書けば任意のパスに変更可能。
 my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/lib/mackerel-agent/id';
 
+# ----------------------------------------------------------------
+# 収集除外フィルター (conf から設定、デフォルトは除外なし)
+#
+# conf の書き方 (カンマ区切り):
+#   IGNORE_INTERFACES=lo0,gif0,plip0
+#   IGNORE_DISKS=md0,cd0
+#   IGNORE_FILESYSTEMS=/tmp,/var/run
+#   IGNORE_FS_TYPES=msdosfs,cd9660
+#
+# ハッシュキーの完全一致で判定するため quotemeta 不要・インジェクション不可。
+# ----------------------------------------------------------------
+my %ignore_iface   = map { s/^\s+|\s+$//gr => 1 }
+                     split(/,/, $ENV{IGNORE_INTERFACES}  // '');
+my %ignore_disk    = map { s/^\s+|\s+$//gr => 1 }
+                     split(/,/, $ENV{IGNORE_DISKS}       // '');
+my %ignore_mount   = map { s/^\s+|\s+$//gr => 1 }
+                     split(/,/, $ENV{IGNORE_FILESYSTEMS} // '');
+my %ignore_fstype  = map { s/^\s+|\s+$//gr => 1 }
+                     split(/,/, $ENV{IGNORE_FS_TYPES}    // '');
+
 my @MEM_KEYS = qw(
     vm.stats.vm.v_page_size
     vm.stats.vm.v_page_count
@@ -85,16 +105,46 @@ sub json_escape {
 
 # ----------------------------------------------------------------
 # sysctl を1コマンドにまとめ "キー: 値" 形式でパース(防弾仕様)
-# -n を使わないことで、キー抜け時の誤マッピングを完全防止。
+# - open('-|', 'sysctl', @keys) でシェルを経由せず直接 exec → インジェクション不可
+# - alarm(2) でタイムアウト保護 → ハング時もメインループを殺さない
+# - open の戻り値 = 本物の子プロセス PID を保持し、タイムアウト時は KILL を送った上で
+#   明示的に waitpid してから $fh を閉じる。
+#   ※ $fh のスコープ離脱による暗黙の close は waitpid でブロックするため、
+#     Dステートハング時にデーモンごとフリーズしないよう先に強制終了する。
 # ----------------------------------------------------------------
 sub sysctl_multi {
     my @keys = @_;
-    my $out = `sysctl @keys 2>/dev/null`;
-    my %h;
-    for my $line (split(/\n/, $out)) {
-        if ($line =~ /^([^:]+):\s*(.*)$/) {
-            $h{$1} = $2;
+    my (%h, $pid, $fh);
+
+    eval {
+        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        alarm(2);
+
+        $pid = open($fh, '-|', 'sysctl', @keys)
+            or die "sysctl open failed: $!\n";
+
+        my $out = do { local $/; <$fh> };
+        close $fh;
+        $pid = undef;    # 正常終了時は PID をクリア
+        alarm(0);
+
+        for my $line (split(/\n/, $out)) {
+            $h{$1} = $2 if $line =~ /^([^:]+):\s*(.*)$/;
         }
+    };
+    alarm(0);
+
+    if ($@) {
+        if ($@ eq "TIMEOUT\n") {
+            warn "[WARN] sysctl timed out (2s). Skipping this collection.\n";
+            if (defined $pid) {
+                kill('KILL', $pid);    # Dステートでも KILL で強制終了
+                waitpid($pid, 0);      # ゾンビ化防止
+            }
+        } else {
+            warn "[WARN] sysctl failed: $@";
+        }
+        %h = ();
     }
     return %h;
 }
@@ -210,9 +260,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.5.2",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.5.2",'
+            . '"agent-version":"1.6",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -387,6 +437,7 @@ while (1) {
         my @cols = split(/\s+/, $line);
         my ($iface, $rx, $tx) = ($cols[0], $cols[7], $cols[10]);
         next unless defined($rx) && defined($tx) && $iface !~ /\*/;
+        next if $ignore_iface{$iface};    # IGNORE_INTERFACES フィルター
 
         $current_net{$iface} = { rx => $rx, tx => $tx };
 
@@ -401,12 +452,27 @@ while (1) {
     }
 
     # --- [4.5] ディスク使用量 ---
+    # IGNORE_FS_TYPES: df -k にはfstype列がないため mount コマンドで補完する。
+    # dfループの外で1回だけ実行してハッシュにキャッシュ → ループ内は O(1) ルックアップ。
+    # マウントポイント数が多くても fork は1回で済む。
+    my %mount_fstype;
+    if (%ignore_fstype) {
+        for my $mline (`mount`) {
+            # 書式: /dev/ada0s1a on /mnt (ufs, local, ...)
+            if ($mline =~ /^\S+\s+on\s+(.+?)\s+\((\w+)/) {
+                $mount_fstype{$1} = $2;
+            }
+        }
+    }
+
     my %fs_meta;
     for my $line (`df -k`) {
         next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
         next unless $line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/;
 
         my ($dev_raw, $total_kb, $used_kb, $avail_kb, $pct, $mount) = ($1,$2,$3,$4,$5,$6);
+        next if $ignore_mount{$mount};                                    # IGNORE_FILESYSTEMS
+        next if %ignore_fstype && $ignore_fstype{ $mount_fstype{$mount} // '' };  # IGNORE_FS_TYPES
         (my $dev_clean = $dev_raw) =~ s{^/dev/}{};
         $dev_clean =~ s{[^\w\-\.]+}{-}g;
         $dev_clean =~ s{^-|-$}{}g;
@@ -438,6 +504,7 @@ while (1) {
                 ? @cols[1,2,3]
                 : @cols[0,1,2];
             next unless $dev && $r_s =~ /^[\d\.]+$/;
+            next if $ignore_disk{$dev};    # IGNORE_DISKS フィルター
             push @metrics,
                 metric_json($host_id, "disk.$dev.reads.delta",  $now, $r_s),
                 metric_json($host_id, "disk.$dev.writes.delta", $now, $w_s);
