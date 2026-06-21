@@ -127,8 +127,8 @@ Mackerelに送信したくない各項目を設定できます。
 ```
 
 設定ファイルの代わりに環境変数で渡すことも可能です
-(sh系: `export MACKEREL_API_KEY=...` / csh・tcsh系: `setenv MACKEREL_API_KEY ...`)
-これは同じシェルセッションから手動で `service mackerel_micro start` した場合のみ有効です。
+(sh系: `export MACKEREL_API_KEY=...` / csh・tcsh系: `setenv MACKEREL_API_KEY ...`)  
+これは同じシェルセッションから手動で `service mackerel_micro start` した場合のみ有効です。  
 起動時 (rc.d 経由の自動起動) には適用されないため、通常は設定ファイルへの記載を推奨します。
 
 ---
