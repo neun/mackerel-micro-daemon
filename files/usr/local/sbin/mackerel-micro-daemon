@@ -70,6 +70,20 @@ print "Mackerel Micro Daemon Initializing... (PID: $$)\n";
 # ================================================================
 
 # ----------------------------------------------------------------
+# JSON文字列値の安全なエスケープ (RFC 8259)
+# \ " および制御文字 (\n \r \t) を対象とする
+# ----------------------------------------------------------------
+sub json_escape {
+    my ($s) = @_;
+    $s =~ s{\\}{\\\\}g;   # \ → \
+    $s =~ s{"}{\\"}g;         # " → \"
+    $s =~ s{\n}{\\n}g;       # LF
+    $s =~ s{\r}{\\r}g;       # CR
+    $s =~ s{\t}{\\t}g;       # TAB
+    return $s;
+}
+
+# ----------------------------------------------------------------
 # sysctl を1コマンドにまとめ "キー: 値" 形式でパース(防弾仕様)
 # -n を使わないことで、キー抜け時の誤マッピングを完全防止。
 # ----------------------------------------------------------------
@@ -109,25 +123,33 @@ sub send_https_request {
                 . $body;
 
     my ($status, $response) = (0, '');
+    my $child_pid;
 
     eval {
         local $SIG{ALRM} = sub { die "TIMEOUT\n" };
         alarm(10);
 
         my ($chld_out, $chld_in);
-        my $pid = open2($chld_out, $chld_in,
+        $child_pid = open2($chld_out, $chld_in,
             "openssl s_client -connect ${API_HOST}:443 -quiet 2>/dev/null");
         print $chld_in $request;
         close $chld_in;
 
         $response = do { local $/; <$chld_out> };
         close $chld_out;
-        waitpid($pid, 0);
+        waitpid($child_pid, 0);
+        $child_pid = undef;    # 正常終了時はクリア
         alarm(0);
 
         $status = $1 + 0 if $response =~ m{HTTP/1\.1 (\d{3}) };
     };
     alarm(0);
+
+    # タイムアウト等で eval を抜けた場合、孤児プロセスを確実に回収する
+    if (defined $child_pid) {
+        kill('TERM', $child_pid);
+        waitpid($child_pid, 0);
+    }
 
     if ($@) {
         warn "send_https_request: $@";
@@ -152,12 +174,11 @@ sub fs_meta_to_json {
     my @entries;
     for my $dev (sort keys %fs) {
         my $info = $fs{$dev};
-        (my $dev_esc = $dev) =~ s/([\\\"])/\\$1/g;
         push @entries, sprintf(
             '"%s":{"kb_size":%d,"kb_used":%d,"kb_available":%d,"percent_used":"%d%%","mount":"%s"}',
-            $dev_esc,
+            json_escape($dev),
             $info->{kb_size}, $info->{kb_used}, $info->{kb_available},
-            $info->{percent_used}, $info->{mount}
+            $info->{percent_used}, json_escape($info->{mount})
         );
     }
     return "{" . join(",", @entries) . "}";
@@ -179,9 +200,9 @@ sub build_spec_json {
     my $phys_mem  = ($sc{'hw.physmem'} // 0) + 0;
     my $mem_kb    = int($phys_mem / 1024) . "kB";
 
-    # JSON文字列内のダブルクォートをエスケープ
-    (my $cpu_model_esc = $cpu_model) =~ s/([\\\"])/\\$1/g;
-    (my $hostname_esc  = $hostname)  =~ s/([\\\"])/\\$1/g;
+    # JSON文字列値を安全にエスケープ (制御文字含む)
+    my $cpu_model_esc = json_escape($cpu_model);
+    my $hostname_esc  = json_escape($hostname);
 
     my @cpu_array = map { sprintf('{"model_name":"%s","cores":"1"}', $cpu_model_esc) } (1 .. $cpu_cores);
     my $cpu_json  = "[" . join(",", @cpu_array) . "]";
@@ -189,9 +210,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.5.1",'
+            . '"agent-name":"mackerel-micro-daemon/v1.5.2",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.5.1",'
+            . '"agent-version":"1.5.2",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -207,6 +228,8 @@ sub build_spec_json {
 # ----------------------------------------------------------------
 sub metric_json {
     my ($host_id, $name, $time, $value) = @_;
+    # value が数値でない場合は 0 に落として不正JSONを防ぐ
+    $value = 0 unless defined $value && $value =~ /^-?[\d\.]+$/;
     return sprintf('{"hostId":"%s","name":"%s","time":%d,"value":%s}',
         $host_id, $name, $time, $value);
 }
