@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use IPC::Open2;
 use Time::HiRes qw(sleep);
+use POSIX qw(WNOHANG);
 
 # =================================================================
 # mackerel-micro-daemon.pl
@@ -90,6 +91,26 @@ print "Mackerel Micro Daemon Initializing... (PID: $$)\n";
 # ================================================================
 
 # ----------------------------------------------------------------
+# タイムアウト後の子プロセスをノンブロッキングで回収するヘルパー
+#
+# D-state にある子プロセスは KILL 直後に終了しないため、
+# waitpid($pid, 0) でブロックするとメインループごと固まる。
+# WNOHANG で最大5回・0.1秒間隔で様子を見て、回収できなければ諦めて戻る。
+# ゾンビが稀に残る可能性はあるが累積しても実害は軽微であり、
+# メインループのフリーズを防ぐことを最優先とする。
+# ----------------------------------------------------------------
+sub reap_timed_out_child {
+    my ($pid, $signal) = @_;
+    return unless defined $pid;
+    kill($signal, $pid);
+    for (1 .. 5) {
+        my $reaped = waitpid($pid, WNOHANG);
+        last if $reaped != 0;
+        select(undef, undef, undef, 0.1);    # 0.1秒待機
+    }
+}
+
+# ----------------------------------------------------------------
 # JSON文字列値の安全なエスケープ (RFC 8259)
 # \ " および制御文字 (\n \r \t) を対象とする
 # ----------------------------------------------------------------
@@ -107,10 +128,10 @@ sub json_escape {
 # sysctl を1コマンドにまとめ "キー: 値" 形式でパース(防弾仕様)
 # - open('-|', 'sysctl', @keys) でシェルを経由せず直接 exec → インジェクション不可
 # - alarm(2) でタイムアウト保護 → ハング時もメインループを殺さない
-# - open の戻り値 = 本物の子プロセス PID を保持し、タイムアウト時は KILL を送った上で
-#   明示的に waitpid してから $fh を閉じる。
+# - open の戻り値 = 本物の子プロセス PID を保持し、タイムアウト時は
+#   reap_timed_out_child() でノンブロッキング回収する。
 #   ※ $fh のスコープ離脱による暗黙の close は waitpid でブロックするため、
-#     Dステートハング時にデーモンごとフリーズしないよう先に強制終了する。
+#     先に PID を回収してから close する設計にする。
 # ----------------------------------------------------------------
 sub sysctl_multi {
     my @keys = @_;
@@ -137,10 +158,7 @@ sub sysctl_multi {
     if ($@) {
         if ($@ eq "TIMEOUT\n") {
             warn "[WARN] sysctl timed out (2s). Skipping this collection.\n";
-            if (defined $pid) {
-                kill('KILL', $pid);    # Dステートでも KILL で強制終了
-                waitpid($pid, 0);      # ゾンビ化防止
-            }
+            reap_timed_out_child($pid, 'KILL');    # WNOHANG でノンブロッキング回収
         } else {
             warn "[WARN] sysctl failed: $@";
         }
@@ -195,11 +213,8 @@ sub send_https_request {
     };
     alarm(0);
 
-    # タイムアウト等で eval を抜けた場合、孤児プロセスを確実に回収する
-    if (defined $child_pid) {
-        kill('TERM', $child_pid);
-        waitpid($child_pid, 0);
-    }
+    # タイムアウト等で eval を抜けた場合、ノンブロッキングで子プロセスを回収する
+    reap_timed_out_child($child_pid, 'TERM') if defined $child_pid;
 
     if ($@) {
         warn "send_https_request: $@";
@@ -260,9 +275,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.1",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6",'
+            . '"agent-version":"1.6.1",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -491,25 +506,49 @@ while (1) {
     }
 
     # --- [4.6] ディスク I/O ---
-    if (open(my $fh, "-|", "iostat -x -c 2 -w 1")) {
-        my $capture = 0;
-        while (my $line = <$fh>) {
-            if ($line =~ /extended device statistics/i) {
-                $capture = 1; <$fh>; next;    # ヘッダースキップ
+    # iostat -x -c 2 -w 1 は正常時約1秒で終わるため alarm(3) で余裕を持たせる。
+    # タイムアウト時は reap_timed_out_child() でノンブロッキング回収し、
+    # ディスク I/O メトリクスだけ欠落させて次のループへ継続する。
+    {
+        my ($iostat_pid, $iostat_fh);
+        eval {
+            local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+            alarm(3);
+
+            $iostat_pid = open($iostat_fh, '-|', 'iostat', '-x', '-c', '2', '-w', '1')
+                or die "iostat open failed: $!\n";
+
+            my $capture = 0;
+            while (my $line = <$iostat_fh>) {
+                if ($line =~ /extended device statistics/i) {
+                    $capture = 1; <$iostat_fh>; next;    # ヘッダースキップ
+                }
+                next unless $capture;
+                my @cols = split(/\s+/, $line);
+                next if @cols < 4;
+                my ($dev, $r_s, $w_s) = $cols[0] eq ''
+                    ? @cols[1,2,3]
+                    : @cols[0,1,2];
+                next unless $dev && $r_s =~ /^[\d\.]+$/;
+                next if $ignore_disk{$dev};    # IGNORE_DISKS フィルター
+                push @metrics,
+                    metric_json($host_id, "disk.$dev.reads.delta",  $now, $r_s),
+                    metric_json($host_id, "disk.$dev.writes.delta", $now, $w_s);
             }
-            next unless $capture;
-            my @cols = split(/\s+/, $line);
-            next if @cols < 4;
-            my ($dev, $r_s, $w_s) = $cols[0] eq ''
-                ? @cols[1,2,3]
-                : @cols[0,1,2];
-            next unless $dev && $r_s =~ /^[\d\.]+$/;
-            next if $ignore_disk{$dev};    # IGNORE_DISKS フィルター
-            push @metrics,
-                metric_json($host_id, "disk.$dev.reads.delta",  $now, $r_s),
-                metric_json($host_id, "disk.$dev.writes.delta", $now, $w_s);
+            close $iostat_fh;
+            $iostat_pid = undef;    # 正常終了時は PID をクリア
+            alarm(0);
+        };
+        alarm(0);
+
+        if ($@) {
+            if ($@ eq "TIMEOUT\n") {
+                warn "[WARN] iostat timed out (3s). Skipping disk I/O metrics.\n";
+            } else {
+                warn "[WARN] iostat failed: $@";
+            }
+            reap_timed_out_child($iostat_pid, 'KILL');
         }
-        close($fh);
     }
 
     # --- [5] メトリック POST ---
