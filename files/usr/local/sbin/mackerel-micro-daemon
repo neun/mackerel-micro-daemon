@@ -275,9 +275,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.1",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.2",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.1",'
+            . '"agent-version":"1.6.2",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -466,7 +466,7 @@ while (1) {
             metric_json($host_id, "interface.${iface}.txBytes.delta", $now, $d_tx);
     }
 
-    # --- [4.5] ディスク使用量 ---
+    # --- [5] ディスク使用量 ---
     # IGNORE_FS_TYPES: df -k にはfstype列がないため mount コマンドで補完する。
     # dfループの外で1回だけ実行してハッシュにキャッシュ → ループ内は O(1) ルックアップ。
     # マウントポイント数が多くても fork は1回で済む。
@@ -505,7 +505,49 @@ while (1) {
         };
     }
 
-    # --- [4.6] ディスク I/O ---
+    # ----------------------------------------------------------------
+    # [6] スワップ情報 (swapinfo)
+    # Mackerel標準仕様に準拠し memory.swap_total / memory.swap_free をByte単位で収集。
+    # 複数スワップ構成（マルチスワップ）時もループで正確に全デバイスの合計値を算出。
+    # 2秒の alarm 保護 ＋ WNOHANG によるノンブロッキング回収でハングを完全防衛。
+    # ----------------------------------------------------------------
+    {
+        my ($swap_pid, $swap_fh);
+        my ($swap_total, $swap_free) = (0, 0);
+        eval {
+            local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+            alarm(2);
+
+            $swap_pid = open($swap_fh, '-|', 'swapinfo', '-k')
+                or die "swapinfo open failed: $!\n";
+
+            while (my $line = <$swap_fh>) {
+                # 出力例: /dev/gpt/swapfs   2097148     0  2097148     0%
+                if ($line =~ /\s+(\d+)\s+\d+\s+(\d+)\s+\d+%/) {
+                    $swap_total += $1 * 1024; # KB -> Byte換算
+                    $swap_free  += $2 * 1024;
+                }
+            }
+            close $swap_fh;
+            $swap_pid = undef;
+            alarm(0);
+
+            push @metrics,
+                metric_json($host_id, "memory.swap_total", $now, $swap_total),
+                metric_json($host_id, "memory.swap_free",  $now, $swap_free);
+        };
+        alarm(0);
+        if ($@) {
+            if ($@ eq "TIMEOUT\n") {
+                warn "[WARN] swapinfo timed out (2s). Skipping swap metrics.\n";
+            } else {
+                warn "[WARN] swapinfo failed: $@";
+            }
+            reap_timed_out_child($swap_pid, 'KILL'); # Dステート対策
+        }
+    }
+
+    # --- [7] ディスク I/O ---
     # iostat -x -c 2 -w 1 は正常時約1秒で終わるため alarm(3) で余裕を持たせる。
     # タイムアウト時は reap_timed_out_child() でノンブロッキング回収し、
     # ディスク I/O メトリクスだけ欠落させて次のループへ継続する。
@@ -551,7 +593,7 @@ while (1) {
         }
     }
 
-    # --- [5] メトリック POST ---
+    # --- [8] メトリック POST ---
     my $payload = "[" . join(',', @metrics) . "]";
     my ($post_code, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
 
@@ -564,10 +606,10 @@ while (1) {
                            || $post_code >= 500)           { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
     else                                                   { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
 
-    # --- [6] ネットワークカウンタのコミット ---
+    # --- [9] ネットワークカウンタのコミット ---
     %prev_net = %current_net if $post_code == 200;
 
-    # --- [7] 初回のみホストスペック PUT ---
+    # --- [10] 初回のみホストスペック PUT ---
     # 補助的な1回限りの処理のため、失敗しても warn で継続する（メトリック送信は継続できる）
     # メトリックPOSTと異なり4xxでも die しない設計（意図的な差異）
     if ($loop_count == 1) {
@@ -579,7 +621,7 @@ while (1) {
         else                                                   { warn "Host spec PUT rejected (${put_code}). Continuing.\n" }
     }
 
-    # --- [8] elapsed time を差し引いて正確に60秒間隔を維持 ---
+    # --- [11] elapsed time を差し引いて正確に60秒間隔を維持 ---
     my $elapsed  = time() - $loop_start;
     my $sleep_sec = 60 - $elapsed;
     if ($sleep_sec > 0) {
