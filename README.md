@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: FreeBSD](https://img.shields.io/badge/Platform-FreeBSD-red.svg)](https://www.freebsd.org/)
 
-**mackerel-micro-daemon** は、[Mackerel](https://ja.mackerel.io/) への監視メトリクス送信を行う、FreeBSD 専用の超軽量非公式エージェントです。
+**mackerel-micro-daemon** は、[Mackerel](https://ja.mackerel.io/) への監視メトリクス送信を行う、FreeBSD 専用の軽量(?)非公式エージェントです。
 
 外部 CPAN モジュール・curl・jq は不要。`perl5` と FreeBSD に標準搭載の `openssl` のみで動作します。
 
