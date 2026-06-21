@@ -178,7 +178,7 @@ Mackerelに送信したくない各項目を設定できます。
 
 ### 既存エージェントを停止
 ```sh
-# service mackerel-agent stop
+# service mackerel_agent stop
 # sysrc mackerel_agent_enable=NO
 ```
 
