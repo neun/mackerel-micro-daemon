@@ -37,7 +37,7 @@
 | カテゴリ | メトリクス |
 |---|---|
 | CPU | user / nice / system / idle (%) |
-| メモリ | total / used / free / active / inactive |
+| メモリ | total / used / free / active / inactive / swap_total / swap_free |
 | ロードアベレージ | loadavg1 / loadavg5 / loadavg15 |
 | ネットワーク | rxBytes.delta / txBytes.delta (インターフェースごと) |
 | ファイルシステム | size / used (マウントポイントごと) |
@@ -85,8 +85,38 @@ MACKEREL_API_KEY=your_api_key_here
 # 任意: ホスト ID ファイルのパス (デフォルト: /var/lib/mackerel-agent/id)
 #MACKEREL_ID_FILE=/var/lib/mackerel-agent/id
 ```
-
 API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/<YOUR-ORG-NAME>?tab=apikeys) から取得できます。
+
+
+```sh
+# =============================================================================
+# [任意] 収集除外フィルター
+# デフォルトはすべて除外なし。必要な項目だけコメントを外して設定してください。
+# 複数指定はカンマ区切り。前後のスペースは自動的に除去されます。
+# =============================================================================
+
+# ネットワークインターフェースの除外
+# 指定したインターフェースの rx/tx メトリクスを収集しません。
+# 例: ループバック・仮想インターフェース・未使用NIC など
+#IGNORE_INTERFACES=lo0, gif0, plip0
+
+# ディスクデバイスの除外 (I/O メトリクス対象)
+# iostat が返すデバイス名で指定します。
+# 例: CD-ROM・メモリディスク・未使用デバイス など
+#IGNORE_DISKS=cd0, md0
+
+# マウントポイントの除外 (ファイルシステム使用量メトリクス対象)
+# df が返すマウントポイントのパスで指定します。
+#IGNORE_FILESYSTEMS=/tmp, /var/run
+
+# ファイルシステム種別の除外
+# mount コマンドが返す fstype 名で指定します。
+# 注意: devfs / procfs / tmpfs 等はコード側でデフォルト除外済みです。
+# 例: ZFS データセットや FAT/exFAT メディアを除外したい場合など
+#IGNORE_FS_TYPES=msdosfs, cd9660, nullfs
+```
+Mackerelに送信したくない各項目を設定できます。
+
 
 ### 設定値の優先順位
 
@@ -94,7 +124,8 @@ API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/<YOUR
 環境変数 > 設定ファイル
 ```
 
-`systemd` 互換の `EnvironmentFile=` や `export MACKEREL_API_KEY=...` でも渡せます。
+設定ファイルの代わりに環境変数で渡すことも可能です
+(sh系: `export MACKEREL_API_KEY=...` / csh・tcsh系: `setenv MACKEREL_API_KEY ...`)
 
 ---
 
