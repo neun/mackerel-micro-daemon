@@ -27,7 +27,7 @@
 ## 特徴
 
 - **最低限の依存** — `perl5` と FreeBSD 標準の `openssl` のみ。外部 CPAN モジュール・curl・jq は不要
-- **軽量** — 単一の `.pl` ファイル、メモリフットプリント最小
+- **軽量** — 単一の `.pl` ファイル、メモリフットプリント軽量
 - **自動登録** — ホスト ID ファイルがなければ Mackerel API に自動で新規登録
 - **乗り換え対応** — 既存の `mackerel-agent` の ID ファイル (`/var/lib/mackerel-agent/id`) をそのまま引き継ぎ可能
 - **FreeBSD ネイティブ** — `sysrc` / `service` / `rc.d` に完全対応
@@ -49,7 +49,7 @@
 
 - FreeBSD 14.x 系以上を推奨
   - 9.x / 10.x（EoL）での動作確認済み。ただし各スクリプトの修正および openssl の追加インストール等が必須
-  - 11.x ～ 13.x は動作未検証ですが、理論的には動くと思われます。
+  - 11.x ～ 13.x は動作未確認のため、自己責任でお試しください。
 - Perl 5.16 以降（`pkg install perl5` で導入）
 - OpenSSL（FreeBSD 標準搭載、`openssl s_client` を使用）
 
