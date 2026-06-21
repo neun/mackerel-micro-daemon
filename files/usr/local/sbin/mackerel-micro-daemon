@@ -182,9 +182,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.5",'
+            . '"agent-name":"mackerel-micro-daemon/v1.5.1",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.5",'
+            . '"agent-version":"1.5.1",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -225,14 +225,24 @@ if ($host_id) {
     # --- isRetired チェック: 退役済みホストへの送信を防止 ---
     # 自動再登録は行わない。意図せず課金対象ホストが増えるリスクを避けるため。
     # 対処: Mackerel コンソールで退役を解除するか、$ID_FILE を削除して再起動する。
+    # 起動直後のDNS解決・疎通が整うまで最大3回リトライしてから諦める
     print "Checking host status on Mackerel...\n";
-    my ($get_code, $get_res) = send_https_request('GET', "/api/v0/hosts/$host_id", '');
+    my ($get_code, $get_res) = (0, '');
+    for my $attempt (1 .. 3) {
+        ($get_code, $get_res) = send_https_request('GET', "/api/v0/hosts/$host_id", '');
+        last if $get_code != 0;
+        warn "[WARN] Cannot reach Mackerel API (attempt $attempt/3). Retrying in 5s...\n";
+        sleep(5);
+    }
 
-    if    ($get_code == 0)   { die "[FATAL] Cannot reach Mackerel API.\n" }
-    elsif ($get_code == 404) { die "[FATAL] Host $host_id not found (404). $ID_FILE may be stale.\n"
-                                 . "  rm $ID_FILE && service mackerel_micro start\n" }
-    elsif ($get_code >= 500) { warn "[WARN] Mackerel server error (${get_code}) on startup check. Proceeding.\n" }
-    elsif ($get_code != 200) { die "[FATAL] Unexpected API response (${get_code}). Aborting.\n" }
+    # 429: レート制限 (一時的) → 5xx 同様に warn で通過してループへ
+    # 5xx: サーバー側一時障害   → warn で通過してループへ
+    # その他4xx/3xx: 恒久的エラー → die
+    if    ($get_code == 0)                         { die "[FATAL] Cannot reach Mackerel API after 3 attempts.\n" }
+    elsif ($get_code == 404)                       { die "[FATAL] Host $host_id not found (404). $ID_FILE may be stale.\n"
+                                                       . "  rm $ID_FILE && service mackerel_micro start\n" }
+    elsif ($get_code == 429 || $get_code >= 500)   { warn "[WARN] Mackerel returned ${get_code} on startup check. Proceeding.\n" }
+    elsif ($get_code != 200)                       { die "[FATAL] Unexpected API response (${get_code}). Aborting.\n" }
     elsif ($get_res =~ /"isRetired"\s*:\s*true/) {
         die "[FATAL] Host $host_id is retired on Mackerel.\n"
           . "  rm $ID_FILE && service mackerel_micro start\n";
@@ -409,22 +419,28 @@ while (1) {
     my $payload = "[" . join(',', @metrics) . "]";
     my ($post_code, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
 
-    # 0 or 5xx: 一時的な不調 → warn してスキップ
-    # 3xx/4xx:  恒久的なエラー → die してデーモン終了
-    if    ($post_code == 200)                        { }  # 正常
-    elsif ($post_code == 0 || $post_code >= 500)     { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
-    else                                             { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
+    # 0/429/5xx: 一時的な不調 → warn してスキップ・次インターバルで自動回復
+    # 429 (Too Many Requests) は RFC 6585 上「一時的」なため retry 対象とする
+    # 3xx/4xx(429除く): 恒久的エラー → die してデーモン終了
+    # ※スペックPUT(初回のみ・補助的処理)は4xxでも warn 継続 (下記[7]参照)
+    if    ($post_code == 200)                              { }  # 正常
+    elsif ($post_code == 0 || $post_code == 429
+                           || $post_code >= 500)           { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
+    else                                                   { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
 
     # --- [6] ネットワークカウンタのコミット ---
     %prev_net = %current_net if $post_code == 200;
 
     # --- [7] 初回のみホストスペック PUT ---
+    # 補助的な1回限りの処理のため、失敗しても warn で継続する（メトリック送信は継続できる）
+    # メトリックPOSTと異なり4xxでも die しない設計（意図的な差異）
     if ($loop_count == 1) {
         my $spec_json  = build_spec_json(%fs_meta);
         my ($put_code) = send_https_request('PUT', "/api/v0/hosts/$host_id", $spec_json);
-        if    ($put_code == 200)                    { print "Host spec updated successfully.\n" }
-        elsif ($put_code == 0 || $put_code >= 500)  { warn "Host spec PUT failed (${put_code}). Will not retry.\n" }
-        else                                        { warn "Host spec PUT rejected (${put_code}). Continuing.\n" }
+        if    ($put_code == 200)                               { print "Host spec updated successfully.\n" }
+        elsif ($put_code == 0 || $put_code == 429
+                              || $put_code >= 500)             { warn "Host spec PUT failed (${put_code}). Will not retry.\n" }
+        else                                                   { warn "Host spec PUT rejected (${put_code}). Continuing.\n" }
     }
 
     # --- [8] elapsed time を差し引いて正確に60秒間隔を維持 ---
