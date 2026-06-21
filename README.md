@@ -51,7 +51,7 @@
   - 8.x 以下 は動作未確認ですが、各スクリプトの修正および openssl 1.0.1系以上の追加インストール等が必須。
   - 9.x / 10.x は動作確認済み。ただし各スクリプトの修正および openssl 1.0.1系以上の追加インストール等が必須。
   - 11.x ～ 13.x は動作未確認のため、自己責任でお試しください。
-  - 14.x ～ 15.x は動作確認済み。特に何もせず動くはずです。releaseにpkgもあるのでお使いください。
+  - 14.x ～ 15.x は動作確認済み。特に何もせず動くはずです。[releaseにpkg](https://github.com/neun/mackerel-micro-daemon/releases/latest)もあるのでお使いください。
 - Perl 5.16 以降（`pkg install perl5` で導入想定）
 - OpenSSL（FreeBSD 標準搭載、`openssl s_client` を使用）
 
