@@ -21,6 +21,8 @@ jobs:
         with:
           # vmactions での環境変数の引き渡し方
           envs: 'GIT_TAG'
+          useshrink: true
+          prepare: false
           # 実行するコマンド
           run: |
             echo "--- FreeBSD VM Started ---"
@@ -56,3 +58,11 @@ jobs:
           name: freebsd-package
           path: '*.pkg'
           retention-days: 7
+      - name: Create GitHub Release and Upload Asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # 成果物として、上で出来上がった .pkg ファイルを指定してリリースに添付します
+          files: '*.pkg'
+          # 💡 これを入れておくと、前回のリリースからの変更点（コミットログ）をGitHubが自動生成して説明文にしてくれます
+          generate_release_notes: true

@@ -8,6 +8,9 @@ use bytes ();
 
 # =================================================================
 # mackerel-micro-daemon
+# Copyright (c) 2026 neun
+# License: MIT
+# https://github.com/neun/mackerel-micro-daemon
 # FreeBSD 標準機能 + Perl 標準モジュールのみ。外部CPANモジュール不要。
 # =================================================================
 
@@ -283,9 +286,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.6",'
+            . '"agent-name":"mackerel-micro-daemon/v1.7",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.6",'
+            . '"agent-version":"1.7.0",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
