@@ -7,27 +7,21 @@ on:
     branches: [ main, master ]
 
 jobs:
-  perl-check:
+  syntax-check:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Perl
         uses: shogo82148/actions-setup-perl@v1
         with:
-          perl-version: '5.16' # 使用したいPerlのバージョン
+          perl-version: '5.16'
 
-      - name: Run syntax check
+      - name: Run Perl syntax check
         run: |
           perl -c files/usr/local/sbin/mackerel-micro-daemon
-
-  shell-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
 
       - name: Run ShellCheck
         run: |
