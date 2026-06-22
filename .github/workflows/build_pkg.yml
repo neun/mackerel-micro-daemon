@@ -42,7 +42,7 @@ jobs:
             
             # 3. pkg create の実行
             echo "Running pkg create..."
-            pkg create -m . -r files/ -o .
+            pkg create -m ./manifest.ucl -r files/ -o .
             
             echo "--- Build Completed ---"
         # 外側の Ubuntu 環境に `GIT_TAG` を用意して VM 内へ引き渡す
