@@ -21,8 +21,8 @@ jobs:
         with:
           # vmactions での環境変数の引き渡し方
           envs: 'GIT_TAG'
-          useshrink: true
-          prepare: false
+          release: '14.0'
+          sync: false
           # 実行するコマンド
           run: |
             echo "--- FreeBSD VM Started ---"
