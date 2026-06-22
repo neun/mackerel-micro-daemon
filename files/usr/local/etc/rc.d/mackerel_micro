@@ -43,10 +43,6 @@ mackerel_micro_prestart()
 mackerel_micro_start()
 {
     echo "Starting ${name}."
-    
-    # -s info から -s notice に変更（または -s を省略するとデフォルトで notice になります）
-    # これにより FreeBSD の標準的な syslog フィルタを通過し、/var/log/messages に書き込まれます。
-    
     /usr/sbin/daemon -f -S -T mackerel-micro -l daemon -s notice -p "${pidfile}" \
         /usr/bin/env perl ${command} ${mackerel_micro_conf} ${mackerel_micro_flags}
 }

@@ -1,7 +1,7 @@
 #!/usr/local/bin/perl
 use strict;
 use warnings;
-use IPC::Open2;
+use IPC::Open3;
 use Time::HiRes qw(sleep);
 use POSIX qw(WNOHANG);
 
@@ -20,7 +20,7 @@ use POSIX qw(WNOHANG);
 #
 # 設定ファイルの書式 (記載例):
 #   MACKEREL_API_KEY=your_api_key_here
-#   MACKEREL_ID_FILE=/var/lib/mackerel-agent/id   # 省略時は↑のデフォルト値
+#   MACKEREL_ID_FILE=/var/lib/mackerel-agent/id   # 省略時デフォルト: /var/lib/mackerel-agent/id
 #   # で始まる行と空行は無視されます
 # ----------------------------------------------------------------
 my $CONF_FILE = $ARGV[0] // '/usr/local/etc/mackerel-micro/mackerel-micro.conf';
@@ -111,6 +111,36 @@ sub reap_timed_out_child {
 }
 
 # ----------------------------------------------------------------
+# 外部コマンドをタイムアウト付きで安全に実行し、出力文字列全体を返す。
+# 失敗・タイムアウト時は undef を返す。
+# open('-|', LIST) 形式でシェルを経由せず直接 exec → インジェクション不可。
+# ----------------------------------------------------------------
+sub run_cmd_safe {
+    my ($timeout, @args) = @_;
+    my ($output, $pid);
+    eval {
+        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        alarm($timeout);
+        $pid = open(my $fh, '-|', @args) or die "$args[0] open failed: $!\n";
+        $output = do { local $/; <$fh> };
+        close $fh;
+        $pid = undef;
+        alarm(0);
+    };
+    alarm(0);
+    if ($@) {
+        if ($@ eq "TIMEOUT\n") {
+            warn "[WARN] $args[0] timed out (${timeout}s). Skipping.\n";
+        } else {
+            warn "[WARN] $args[0] failed: $@";
+        }
+        reap_timed_out_child($pid, 'KILL') if defined $pid;
+        return undef;
+    }
+    return $output;
+}
+
+# ----------------------------------------------------------------
 # JSON文字列値の安全なエスケープ (RFC 8259)
 # \ " および制御文字 (\n \r \t) を対象とする
 # ----------------------------------------------------------------
@@ -169,7 +199,8 @@ sub sysctl_multi {
 
 # ----------------------------------------------------------------
 # HTTPS送信ヘルパー (PUT / POST 共通、タイムアウト保護付き)
-# open2 で openssl s_client を起動し、リクエストを stdin に直接書き込む
+# open3 で openssl s_client をリスト形式で起動(シェル経由なし)し、
+# リクエストを stdin に直接書き込む。stderr は /dev/null に捨てる。
 # 【セキュリティ上のトレードオフ・意図的な選択】
 # openssl s_client は証明書検証エラーが出てもハンドシェイクを継続する(MITM耐性なし)。
 # -verify_return_error + ca_root_nss で検証を強制することも可能だが、
@@ -197,9 +228,10 @@ sub send_https_request {
         local $SIG{ALRM} = sub { die "TIMEOUT\n" };
         alarm(10);
 
-        my ($chld_out, $chld_in);
-        $child_pid = open2($chld_out, $chld_in,
-            "openssl s_client -connect ${API_HOST}:443 -quiet 2>/dev/null");
+        my ($chld_in, $chld_out);
+        open(my $devnull, '>', '/dev/null') or die "Cannot open /dev/null: $!\n";
+        $child_pid = open3($chld_in, $chld_out, $devnull,
+            'openssl', 's_client', '-connect', "${API_HOST}:443", '-quiet');
         print $chld_in $request;
         close $chld_in;
 
@@ -225,9 +257,10 @@ sub send_https_request {
 
 # ----------------------------------------------------------------
 # kern.cp_time を取得 (user, nice, system, interrupt, idle)
+# タイムアウト時は空リストを返す (呼び出し元が @cp_time == 5 で判定)
 # ----------------------------------------------------------------
 sub get_cp_time {
-    my $raw = `sysctl -n kern.cp_time`;
+    my $raw = run_cmd_safe(2, 'sysctl', '-n', 'kern.cp_time') // '';
     return split(/\s+/, $raw);
 }
 
@@ -255,9 +288,9 @@ sub fs_meta_to_json {
 sub build_spec_json {
     my (%fs) = @_;
 
-    my $hostname = `hostname`; chomp $hostname;
-    my $arch     = `uname -p`; chomp $arch;
-    my $os_rel   = `uname -r`; chomp $os_rel;
+    my $hostname = run_cmd_safe(2, 'hostname')  // ''; chomp $hostname;
+    my $arch     = run_cmd_safe(2, 'uname', '-p') // ''; chomp $arch;
+    my $os_rel   = run_cmd_safe(2, 'uname', '-r') // ''; chomp $os_rel;
 
     my %sc       = sysctl_multi(qw(hw.model hw.ncpu hw.physmem));
     my $cpu_model = $sc{'hw.model'} // 'unknown'; $cpu_model =~ s/^\s+|\s+$//g;
@@ -268,6 +301,8 @@ sub build_spec_json {
     # JSON文字列値を安全にエスケープ (制御文字含む)
     my $cpu_model_esc = json_escape($cpu_model);
     my $hostname_esc  = json_escape($hostname);
+    my $arch_esc      = json_escape($arch);
+    my $os_rel_esc    = json_escape($os_rel);
 
     my @cpu_array = map { sprintf('{"model_name":"%s","cores":"1"}', $cpu_model_esc) } (1 .. $cpu_cores);
     my $cpu_json  = "[" . join(",", @cpu_array) . "]";
@@ -275,16 +310,16 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.2",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.3",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.2",'
+            . '"agent-version":"1.6.3",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
             . '"memory":{"total":"%s"}'
         . '},'
         . '"interfaces":[],"roleFullnames":[],"checks":[]}',
-        $hostname_esc, $cpu_json, $fs_json, $arch, $os_rel, $mem_kb
+        $hostname_esc, $cpu_json, $fs_json, $arch_esc, $os_rel_esc, $mem_kb
     );
 }
 
@@ -349,7 +384,7 @@ if ($host_id) {
 
     # df -k を取得しておく(spec JSON にも使う)
     my %fs_for_register;
-    for my $line (`df -k`) {
+    for my $line (split(/\n/, run_cmd_safe(10, 'df', '-k') // '')) {
         next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
         if ($line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/) {
             $fs_for_register{$1} = {
@@ -383,7 +418,7 @@ if ($host_id) {
 # ----------------------------------------------------------------
 # ループ外で固定値をキャッシュ (fork削減)
 # ----------------------------------------------------------------
-my $core_count = (`sysctl -n hw.ncpu` + 0) || 1;
+my $core_count = ((run_cmd_safe(2, 'sysctl', '-n', 'hw.ncpu') // '1') + 0) || 1;
 
 # ================================================================
 # 【PHASE 2】定期メトリック送信ループ
@@ -437,7 +472,7 @@ while (1) {
         metric_json($host_id, "memory.inactive", $now, $inact_cnt  * $page_size);
 
     # --- [3] ロードアベレージ ---
-    my $loadavg = `sysctl -n vm.loadavg`;
+    my $loadavg = run_cmd_safe(2, 'sysctl', '-n', 'vm.loadavg') // '';
     if ($loadavg =~ /([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)/) {
         push @metrics,
             metric_json($host_id, "loadavg1",  $now, $1),
@@ -447,7 +482,7 @@ while (1) {
 
     # --- [4] ネットワーク ---
     my %current_net;
-    for my $line (`netstat -bni`) {
+    for my $line (split(/\n/, run_cmd_safe(5, 'netstat', '-bni') // '')) {
         next if $line =~ /^(?:Name|lo|plip)/ || $line =~ /Link/;
         my @cols = split(/\s+/, $line);
         my ($iface, $rx, $tx) = ($cols[0], $cols[7], $cols[10]);
@@ -472,7 +507,7 @@ while (1) {
     # マウントポイント数が多くても fork は1回で済む。
     my %mount_fstype;
     if (%ignore_fstype) {
-        for my $mline (`mount`) {
+        for my $mline (split(/\n/, run_cmd_safe(5, 'mount') // '')) {
             # 書式: /dev/ada0s1a on /mnt (ufs, local, ...)
             if ($mline =~ /^\S+\s+on\s+(.+?)\s+\((\w+)/) {
                 $mount_fstype{$1} = $2;
@@ -481,7 +516,7 @@ while (1) {
     }
 
     my %fs_meta;
-    for my $line (`df -k`) {
+    for my $line (split(/\n/, run_cmd_safe(10, 'df', '-k') // '')) {
         next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
         next unless $line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/;
 
@@ -627,7 +662,6 @@ while (1) {
     if ($sleep_sec > 0) {
         sleep($sleep_sec);
     } else {
-        warn "[WARN] loop took ${elapsed}s (>60s), skipping sleep.
-";
+        warn "[WARN] loop took ${elapsed}s (>60s), skipping sleep.\n";
     }
 }
