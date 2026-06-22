@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: FreeBSD](https://img.shields.io/badge/Platform-FreeBSD-red.svg)](https://www.freebsd.org/)
+[![Perl and Shell Syntax Check](https://github.com/neun/mackerel-micro-daemon/actions/workflows/syntax-check.yml/badge.svg)](https://github.com/neun/mackerel-micro-daemon/actions/workflows/syntax-check.yml)
 
 **mackerel-micro-daemon** は、[Mackerel](https://ja.mackerel.io/) への監視メトリクス送信を行う、FreeBSD 専用の軽量(?)非公式エージェントです。
 

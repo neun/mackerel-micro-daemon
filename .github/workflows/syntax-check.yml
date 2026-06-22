@@ -1,4 +1,4 @@
-name: Perl Syntax Check
+name: Perl and Shell Syntax Check
 
 on:
   push:
