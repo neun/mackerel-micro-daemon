@@ -71,7 +71,7 @@ else
     chmod 0600 "${CONF_FILE}"
 
     printf "\n${YELLOW}%s${RESET}\n" "------------------------------------------------------------"
-    printf "${BOLD}次のステップ: API キーを設定ファイルに記入してください。${RESET}\n"
+    printf '%s\n' "${BOLD}次のステップ: API キーを設定ファイルに記入してください。${RESET}"
     printf "  vi %s\n" "${CONF_FILE}"
     printf "  → MACKEREL_API_KEY=<あなたのAPIキー> を設定\n"
     printf "${YELLOW}%s${RESET}\n\n" "------------------------------------------------------------"
@@ -88,7 +88,7 @@ sysrc mackerel_micro_enable=YES
 section "インストール完了"
 # =============================================================================
 
-printf "\n${GREEN}${BOLD}インストールが完了しました！${RESET}\n\n"
+printf '\n%s\n\n' "${GREEN}${BOLD}インストールが完了しました！${RESET}"
 printf "次のステップ:\n"
 printf "  1. API キーを設定ファイルに記入:\n"
 printf "       vi %s\n" "${CONF_FILE}"
