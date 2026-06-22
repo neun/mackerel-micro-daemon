@@ -4,6 +4,7 @@ use warnings;
 use IPC::Open3;
 use Time::HiRes qw(sleep);
 use POSIX qw(WNOHANG);
+use bytes ();
 
 # =================================================================
 # mackerel-micro-daemon
@@ -60,6 +61,12 @@ my @MEM_KEYS = qw(
     vm.stats.vm.v_laundry_count
 );
 
+# ----------------------------------------------------------------
+# グレースフルシャットダウン用 SIGTERM / SIGINT ハンドラ
+# ----------------------------------------------------------------
+$SIG{TERM} = sub { warn "[INFO] Received SIGTERM. Shutting down.\n"; exit 0; };
+$SIG{INT}  = sub { warn "[INFO] Received SIGINT. Shutting down.\n";  exit 0; };
+
 print "Mackerel Micro Daemon Initializing... (PID: $$)\n";
 
 # ================================================================
@@ -70,16 +77,22 @@ sub reap_timed_out_child {
     my ($pid, $signal) = @_;
     return unless defined $pid;
     kill($signal, $pid);
-    for (1 .. 5) {
+    for (1 .. 10) {
         my $reaped = waitpid($pid, WNOHANG);
         last if $reaped != 0;
         select(undef, undef, undef, 0.1);
     }
+    # KILLでも残っているなら最終手段
+    if (waitpid($pid, WNOHANG) == 0) {
+        kill('KILL', $pid);
+        waitpid($pid, 0);
+    }
 }
 
 # ----------------------------------------------------------------
-# 【修正】ALRM発火時にスコープを抜ける前にプロセスをKILLし、
-# 暗黙の close による waitpid ブロックを防止する防弾仕様。
+# ALRM発火時にスコープを抜ける前にプロセスをKILLし、
+# 暗黙の close による waitpid ブロックを軽減する実装。
+# ※ KILL後の waitpid は通常短時間で戻るため実用上問題なし。
 # ----------------------------------------------------------------
 sub run_cmd_safe {
     my ($timeout, @args) = @_;
@@ -116,6 +129,10 @@ sub json_escape {
     $s =~ s{\n}{\\n}g;
     $s =~ s{\r}{\\r}g;
     $s =~ s{\t}{\\t}g;
+    $s =~ s{\x08}{\\b}g;
+    $s =~ s{\x0c}{\\f}g;
+    # U+0000-U+001F の残りの制御文字を \uXXXX でエスケープ
+    $s =~ s{([\x00-\x1f])}{sprintf("\\u%04x", ord($1))}ge;
     return $s;
 }
 
@@ -157,37 +174,43 @@ sub sysctl_multi {
 }
 
 # ----------------------------------------------------------------
-# 【修正】SIGPIPE を無視し、openssl突然死によるデーモンクラッシュを防止
+# SIGPIPE を無視し、openssl突然死によるデーモンクラッシュを防止。
+# タイムアウト時は $chld_out/$devnull を明示的に閉じてから
+# 子プロセスを回収することで FD リーク・waitpid ブロックを防止。
 # ----------------------------------------------------------------
 sub send_https_request {
     my ($method, $path, $json) = @_;
 
     my $body = $json // '';
+    my $body_bytes = bytes::length($body);
     my $request = "${method} ${path} HTTP/1.1\r\n"
                 . "Host: ${API_HOST}\r\n"
                 . "X-Api-Key: ${API_KEY}\r\n"
                 . "Content-Type: application/json\r\n"
-                . "Content-Length: " . length($body) . "\r\n"
+                . "Content-Length: ${body_bytes}\r\n"
                 . "Connection: close\r\n\r\n"
                 . $body;
 
     my ($status, $response) = (0, '');
-    my $child_pid;
+    my ($child_pid, $chld_in, $chld_out, $devnull);
 
     eval {
         local $SIG{ALRM} = sub { die "TIMEOUT\n" };
         local $SIG{PIPE} = 'IGNORE'; # SIGPIPEによるプロセス終了を防止
         alarm(10);
 
-        my ($chld_in, $chld_out);
-        open(my $devnull, '>', '/dev/null') or die "Cannot open /dev/null: $!\n";
+        open($devnull, '>', '/dev/null') or die "Cannot open /dev/null: $!\n";
         $child_pid = open3($chld_in, $chld_out, $devnull,
             'openssl', 's_client', '-connect', "${API_HOST}:443", '-quiet');
         print $chld_in $request;
         close $chld_in;
+        undef $chld_in;
 
         $response = do { local $/; <$chld_out> };
         close $chld_out;
+        undef $chld_out;
+        close $devnull;
+        undef $devnull;
         waitpid($child_pid, 0);
         $child_pid = undef;
         alarm(0);
@@ -196,6 +219,9 @@ sub send_https_request {
     };
     alarm(0);
 
+    # タイムアウト・エラー時の明示的なリソース解放
+    if (defined $chld_out)  { close $chld_out;  undef $chld_out; }
+    if (defined $devnull)   { close $devnull;   undef $devnull; }
     reap_timed_out_child($child_pid, 'TERM') if defined $child_pid;
 
     if ($@) {
@@ -232,7 +258,7 @@ my $core_count = ((run_cmd_safe(2, 'sysctl', '-n', 'hw.ncpu') // '1') + 0) || 1;
 
 # ----------------------------------------------------------------
 # ホストスペック JSON を組み立てる
-# 【修正】hw.ncpu の重複取得を廃止し、グローバルの $core_count を利用
+# グローバルの $core_count を利用（hw.ncpu の重複取得を廃止）
 # ----------------------------------------------------------------
 sub build_spec_json {
     my (%fs) = @_;
@@ -257,9 +283,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.5",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.6",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.5",'
+            . '"agent-version":"1.6.6",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -334,8 +360,10 @@ if ($host_id) {
     $host_id = $1;
 
     (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
-    mkdir $id_dir or die "Cannot create directory $id_dir: $!\n"
-        if $id_dir && ! -d $id_dir;
+    if ($id_dir && ! -d $id_dir) {
+        # mkdir が競合しても既存ディレクトリなら問題なし
+        mkdir($id_dir) or (-d $id_dir) or die "Cannot create directory $id_dir: $!\n";
+    }
 
     open(my $fh, '>', $ID_FILE) or die "Cannot write $ID_FILE: $!\n";
     print $fh $host_id; close $fh;
@@ -403,13 +431,14 @@ while (1) {
     }
 
     # --- [4] ネットワーク ---
-    # 【修正】初回実行時（prevが存在しない時）のゼロ送信を防止
+    # 初回実行時（prevが存在しない時）のゼロ送信を防止
     my %current_net;
     for my $line (split(/\n/, run_cmd_safe(5, 'netstat', '-bni') // '')) {
         next if $line =~ /^(?:Name|lo|plip)/ || $line =~ /Link/;
         my @cols = split(/\s+/, $line);
         my ($iface, $rx, $tx) = ($cols[0], $cols[7], $cols[10]);
         next unless defined($rx) && defined($tx) && $iface !~ /\*/;
+        next unless $rx =~ /^\d+$/ && $tx =~ /^\d+$/;
         next if $ignore_iface{$iface};
 
         $current_net{$iface} = { rx => $rx, tx => $tx };
@@ -493,11 +522,12 @@ while (1) {
             } else {
                 warn "[WARN] swapinfo failed: $@";
             }
-            reap_timed_out_child($swap_pid, 'KILL');
+            reap_timed_out_child($swap_pid, 'KILL') if defined $swap_pid;
         }
     }
 
     # --- [7] ディスク I/O ---
+    # iostat -x -c 2 -w 1 は約2秒かかるため alarm(5) を設定
     {
         my ($iostat_pid, $iostat_fh);
         eval {
@@ -505,7 +535,7 @@ while (1) {
                 kill('KILL', $iostat_pid) if defined $iostat_pid; 
                 die "TIMEOUT\n"; 
             };
-            alarm(3);
+            alarm(5);
 
             $iostat_pid = open($iostat_fh, '-|', 'iostat', '-x', '-c', '2', '-w', '1')
                 or die "iostat open failed: $!\n";
@@ -535,11 +565,11 @@ while (1) {
 
         if ($@) {
             if ($@ eq "TIMEOUT\n") {
-                warn "[WARN] iostat timed out (3s). Skipping disk I/O metrics.\n";
+                warn "[WARN] iostat timed out (5s). Skipping disk I/O metrics.\n";
             } else {
                 warn "[WARN] iostat failed: $@";
             }
-            reap_timed_out_child($iostat_pid, 'KILL');
+            reap_timed_out_child($iostat_pid, 'KILL') if defined $iostat_pid;
         }
     }
 
