@@ -257,9 +257,9 @@ sub build_spec_json {
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.4",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.5",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.4",'
+            . '"agent-version":"1.6.5",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
