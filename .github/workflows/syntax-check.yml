@@ -1,0 +1,24 @@
+name: Perl Syntax Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  perl-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.16' # 使用したいPerlのバージョン
+
+      - name: Run syntax check
+        run: |
+          perl -c files/usr/local/sbin/mackerel-micro-daemon
