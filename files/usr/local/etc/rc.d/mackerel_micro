@@ -44,7 +44,7 @@ mackerel_micro_start()
 {
     echo "Starting ${name}."
     /usr/sbin/daemon -f -S -T mackerel-micro -l daemon -s notice -p "${pidfile}" \
-        /usr/bin/env perl ${command} "${mackerel_micro_conf}" ${mackerel_micro_flags}
+        /usr/local/bin/perl ${command} "${mackerel_micro_conf}" "${mackerel_micro_flags}"
 }
 
 mackerel_micro_stop()

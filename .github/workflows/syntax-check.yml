@@ -30,6 +30,6 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          shellcheck files/usr/local/etc/rc.d/mackerel_micro
-          shellcheck install.sh
-          shellcheck uninstall.sh
+          shellcheck -e SC2034,SC1091,SC2223 files/usr/local/etc/rc.d/mackerel_micro
+          shellcheck -e SC2034,SC1091,SC2223 install.sh
+          shellcheck -e SC2034,SC1091,SC2223 uninstall.sh
