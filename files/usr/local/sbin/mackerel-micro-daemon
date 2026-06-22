@@ -12,16 +12,6 @@ use POSIX qw(WNOHANG);
 
 # ----------------------------------------------------------------
 # 【STEP 0】設定ファイル / 環境変数からAPIキーを読み込む
-#
-# 優先順位:
-#   1. 環境変数 (sh 系: export、csh/tcsh 系: setenv で渡す場合)
-#   2. 設定ファイル (デフォルト: /usr/local/etc/mackerel-micro/mackerel-micro.conf)
-#      コマンドライン引数で別パスを指定可: perl mackerel-micro-daemon.pl /path/to/conf
-#
-# 設定ファイルの書式 (記載例):
-#   MACKEREL_API_KEY=your_api_key_here
-#   MACKEREL_ID_FILE=/var/lib/mackerel-agent/id   # 省略時デフォルト: /var/lib/mackerel-agent/id
-#   # で始まる行と空行は無視されます
 # ----------------------------------------------------------------
 my $CONF_FILE = $ARGV[0] // '/usr/local/etc/mackerel-micro/mackerel-micro.conf';
 
@@ -31,9 +21,9 @@ sub load_conf {
     open(my $fh, '<', $path) or do { warn "Cannot open $path: $!\n"; return };
     while (my $line = <$fh>) {
         chomp $line;
-        next if $line =~ /^\s*#/ || $line =~ /^\s*$/;    # コメント・空行スキップ
+        next if $line =~ /^\s*#/ || $line =~ /^\s*$/;
         if ($line =~ /^\s*([A-Z_][A-Z0-9_]*)\s*=\s*"?([^"]*?)"?\s*$/) {
-            $ENV{$1} //= $2;    # 環境変数が既にある場合は上書きしない(優先順位1を守る)
+            $ENV{$1} //= $2;
         }
     }
     close $fh;
@@ -47,32 +37,18 @@ my $API_KEY = $ENV{MACKEREL_API_KEY}
          . "  設定ファイル $CONF_FILE に MACKEREL_API_KEY=... を記載してください。\n";
 
 # ----------------------------------------------------------------
-# 定数 (confで上書き可能なものは %ENV 経由で解決)
+# 定数
 # ----------------------------------------------------------------
 my $API_HOST = 'api.mackerelio.com';
-# 既存の mackerel-agent からの乗り換えをそのままサポートするためデフォルトを合わせる。
-# confに MACKEREL_ID_FILE=/path/to/id を書けば任意のパスに変更可能。
 my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/lib/mackerel-agent/id';
 
 # ----------------------------------------------------------------
-# 収集除外フィルター (conf から設定、デフォルトは除外なし)
-#
-# conf の書き方 (カンマ区切り):
-#   IGNORE_INTERFACES=lo0,gif0,plip0
-#   IGNORE_DISKS=md0,cd0
-#   IGNORE_FILESYSTEMS=/tmp,/var/run
-#   IGNORE_FS_TYPES=msdosfs,cd9660
-#
-# ハッシュキーの完全一致で判定するため quotemeta 不要・インジェクション不可。
+# 収集除外フィルター
 # ----------------------------------------------------------------
-my %ignore_iface   = map { s/^\s+|\s+$//gr => 1 }
-                     split(/,/, $ENV{IGNORE_INTERFACES}  // '');
-my %ignore_disk    = map { s/^\s+|\s+$//gr => 1 }
-                     split(/,/, $ENV{IGNORE_DISKS}       // '');
-my %ignore_mount   = map { s/^\s+|\s+$//gr => 1 }
-                     split(/,/, $ENV{IGNORE_FILESYSTEMS} // '');
-my %ignore_fstype  = map { s/^\s+|\s+$//gr => 1 }
-                     split(/,/, $ENV{IGNORE_FS_TYPES}    // '');
+my %ignore_iface   = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_INTERFACES}  // '');
+my %ignore_disk    = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_DISKS}       // '');
+my %ignore_mount   = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_FILESYSTEMS} // '');
+my %ignore_fstype  = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_FS_TYPES}    // '');
 
 my @MEM_KEYS = qw(
     vm.stats.vm.v_page_size
@@ -90,15 +66,6 @@ print "Mackerel Micro Daemon Initializing... (PID: $$)\n";
 # サブルーチン群
 # ================================================================
 
-# ----------------------------------------------------------------
-# タイムアウト後の子プロセスをノンブロッキングで回収するヘルパー
-#
-# D-state にある子プロセスは KILL 直後に終了しないため、
-# waitpid($pid, 0) でブロックするとメインループごと固まる。
-# WNOHANG で最大5回・0.1秒間隔で様子を見て、回収できなければ諦めて戻る。
-# ゾンビが稀に残る可能性はあるが累積しても実害は軽微であり、
-# メインループのフリーズを防ぐことを最優先とする。
-# ----------------------------------------------------------------
 sub reap_timed_out_child {
     my ($pid, $signal) = @_;
     return unless defined $pid;
@@ -106,20 +73,22 @@ sub reap_timed_out_child {
     for (1 .. 5) {
         my $reaped = waitpid($pid, WNOHANG);
         last if $reaped != 0;
-        select(undef, undef, undef, 0.1);    # 0.1秒待機
+        select(undef, undef, undef, 0.1);
     }
 }
 
 # ----------------------------------------------------------------
-# 外部コマンドをタイムアウト付きで安全に実行し、出力文字列全体を返す。
-# 失敗・タイムアウト時は undef を返す。
-# open('-|', LIST) 形式でシェルを経由せず直接 exec → インジェクション不可。
+# 【修正】ALRM発火時にスコープを抜ける前にプロセスをKILLし、
+# 暗黙の close による waitpid ブロックを防止する防弾仕様。
 # ----------------------------------------------------------------
 sub run_cmd_safe {
     my ($timeout, @args) = @_;
     my ($output, $pid);
     eval {
-        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        local $SIG{ALRM} = sub { 
+            kill('KILL', $pid) if defined $pid; 
+            die "TIMEOUT\n"; 
+        };
         alarm($timeout);
         $pid = open(my $fh, '-|', @args) or die "$args[0] open failed: $!\n";
         $output = do { local $/; <$fh> };
@@ -140,35 +109,25 @@ sub run_cmd_safe {
     return $output;
 }
 
-# ----------------------------------------------------------------
-# JSON文字列値の安全なエスケープ (RFC 8259)
-# \ " および制御文字 (\n \r \t) を対象とする
-# ----------------------------------------------------------------
 sub json_escape {
     my ($s) = @_;
-    $s =~ s{\\}{\\\\}g;   # \ → \\ (バックスラッシュ1個 → JSON用2個)
-    $s =~ s{"}{\\"}g;         # " → \"
-    $s =~ s{\n}{\\n}g;       # LF
-    $s =~ s{\r}{\\r}g;       # CR
-    $s =~ s{\t}{\\t}g;       # TAB
+    $s =~ s{\\}{\\\\}g;
+    $s =~ s{"}{\\"}g;
+    $s =~ s{\n}{\\n}g;
+    $s =~ s{\r}{\\r}g;
+    $s =~ s{\t}{\\t}g;
     return $s;
 }
 
-# ----------------------------------------------------------------
-# sysctl を1コマンドにまとめ "キー: 値" 形式でパース(防弾仕様)
-# - open('-|', 'sysctl', @keys) でシェルを経由せず直接 exec → インジェクション不可
-# - alarm(2) でタイムアウト保護 → ハング時もメインループを殺さない
-# - open の戻り値 = 本物の子プロセス PID を保持し、タイムアウト時は
-#   reap_timed_out_child() でノンブロッキング回収する。
-#   ※ $fh のスコープ離脱による暗黙の close は waitpid でブロックするため、
-#     先に PID を回収してから close する設計にする。
-# ----------------------------------------------------------------
 sub sysctl_multi {
     my @keys = @_;
     my (%h, $pid, $fh);
 
     eval {
-        local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        local $SIG{ALRM} = sub { 
+            kill('KILL', $pid) if defined $pid; 
+            die "TIMEOUT\n"; 
+        };
         alarm(2);
 
         $pid = open($fh, '-|', 'sysctl', @keys)
@@ -176,7 +135,7 @@ sub sysctl_multi {
 
         my $out = do { local $/; <$fh> };
         close $fh;
-        $pid = undef;    # 正常終了時は PID をクリア
+        $pid = undef;
         alarm(0);
 
         for my $line (split(/\n/, $out)) {
@@ -188,7 +147,7 @@ sub sysctl_multi {
     if ($@) {
         if ($@ eq "TIMEOUT\n") {
             warn "[WARN] sysctl timed out (2s). Skipping this collection.\n";
-            reap_timed_out_child($pid, 'KILL');    # WNOHANG でノンブロッキング回収
+            reap_timed_out_child($pid, 'KILL');
         } else {
             warn "[WARN] sysctl failed: $@";
         }
@@ -198,16 +157,7 @@ sub sysctl_multi {
 }
 
 # ----------------------------------------------------------------
-# HTTPS送信ヘルパー (PUT / POST 共通、タイムアウト保護付き)
-# open3 で openssl s_client をリスト形式で起動(シェル経由なし)し、
-# リクエストを stdin に直接書き込む。stderr は /dev/null に捨てる。
-# 【セキュリティ上のトレードオフ・意図的な選択】
-# openssl s_client は証明書検証エラーが出てもハンドシェイクを継続する(MITM耐性なし)。
-# -verify_return_error + ca_root_nss で検証を強制することも可能だが、
-#   1) 漏洩しうる情報は Mackerel Write API キーのみで被害は限定的
-#   2) ca_root_nss は古い/放置されたFreeBSD機で更新が止まり、
-#      むしろ監視そのものがサイレントに死ぬリスクの方が高い
-# という判断から、本プロジェクトでは意図的に検証を行わない。
+# 【修正】SIGPIPE を無視し、openssl突然死によるデーモンクラッシュを防止
 # ----------------------------------------------------------------
 sub send_https_request {
     my ($method, $path, $json) = @_;
@@ -226,6 +176,7 @@ sub send_https_request {
 
     eval {
         local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+        local $SIG{PIPE} = 'IGNORE'; # SIGPIPEによるプロセス終了を防止
         alarm(10);
 
         my ($chld_in, $chld_out);
@@ -238,14 +189,13 @@ sub send_https_request {
         $response = do { local $/; <$chld_out> };
         close $chld_out;
         waitpid($child_pid, 0);
-        $child_pid = undef;    # 正常終了時はクリア
+        $child_pid = undef;
         alarm(0);
 
         $status = $1 + 0 if $response =~ m{HTTP/1\.1 (\d{3}) };
     };
     alarm(0);
 
-    # タイムアウト等で eval を抜けた場合、ノンブロッキングで子プロセスを回収する
     reap_timed_out_child($child_pid, 'TERM') if defined $child_pid;
 
     if ($@) {
@@ -255,18 +205,11 @@ sub send_https_request {
     return ($status, $response);
 }
 
-# ----------------------------------------------------------------
-# kern.cp_time を取得 (user, nice, system, interrupt, idle)
-# タイムアウト時は空リストを返す (呼び出し元が @cp_time == 5 で判定)
-# ----------------------------------------------------------------
 sub get_cp_time {
     my $raw = run_cmd_safe(2, 'sysctl', '-n', 'kern.cp_time') // '';
     return split(/\s+/, $raw);
 }
 
-# ----------------------------------------------------------------
-# ファイルシステム情報をJSON文字列に変換
-# ----------------------------------------------------------------
 sub fs_meta_to_json {
     my (%fs) = @_;
     my @entries;
@@ -282,8 +225,14 @@ sub fs_meta_to_json {
     return "{" . join(",", @entries) . "}";
 }
 
+# ================================================================
+# グローバルキャッシュ (fork削減のためサブルーチン後・PHASE 1前に取得)
+# ================================================================
+my $core_count = ((run_cmd_safe(2, 'sysctl', '-n', 'hw.ncpu') // '1') + 0) || 1;
+
 # ----------------------------------------------------------------
-# ホストスペック JSON を組み立てる (POST 新規登録 / PUT 更新 共通)
+# ホストスペック JSON を組み立てる
+# 【修正】hw.ncpu の重複取得を廃止し、グローバルの $core_count を利用
 # ----------------------------------------------------------------
 sub build_spec_json {
     my (%fs) = @_;
@@ -292,27 +241,25 @@ sub build_spec_json {
     my $arch     = run_cmd_safe(2, 'uname', '-p') // ''; chomp $arch;
     my $os_rel   = run_cmd_safe(2, 'uname', '-r') // ''; chomp $os_rel;
 
-    my %sc       = sysctl_multi(qw(hw.model hw.ncpu hw.physmem));
+    my %sc        = sysctl_multi(qw(hw.model hw.physmem));
     my $cpu_model = $sc{'hw.model'} // 'unknown'; $cpu_model =~ s/^\s+|\s+$//g;
-    my $cpu_cores = ($sc{'hw.ncpu'} // 1) + 0;
     my $phys_mem  = ($sc{'hw.physmem'} // 0) + 0;
     my $mem_kb    = int($phys_mem / 1024) . "kB";
 
-    # JSON文字列値を安全にエスケープ (制御文字含む)
     my $cpu_model_esc = json_escape($cpu_model);
     my $hostname_esc  = json_escape($hostname);
     my $arch_esc      = json_escape($arch);
     my $os_rel_esc    = json_escape($os_rel);
 
-    my @cpu_array = map { sprintf('{"model_name":"%s","cores":"1"}', $cpu_model_esc) } (1 .. $cpu_cores);
+    my @cpu_array = map { sprintf('{"model_name":"%s","cores":"1"}', $cpu_model_esc) } (1 .. $core_count);
     my $cpu_json  = "[" . join(",", @cpu_array) . "]";
     my $fs_json   = fs_meta_to_json(%fs);
 
     return sprintf(
         '{"name":"%s","meta":{'
-            . '"agent-name":"mackerel-micro-daemon/v1.6.3",'
+            . '"agent-name":"mackerel-micro-daemon/v1.6.4",'
             . '"agent-revision":"ops",'
-            . '"agent-version":"1.6.3",'
+            . '"agent-version":"1.6.4",'
             . '"cpu":%s,'
             . '"filesystem":%s,'
             . '"kernel":{"machine":"%s","name":"FreeBSD","os":"FreeBSD","release":"%s"},'
@@ -323,12 +270,8 @@ sub build_spec_json {
     );
 }
 
-# ----------------------------------------------------------------
-# メトリック1件分のJSON文字列を生成
-# ----------------------------------------------------------------
 sub metric_json {
     my ($host_id, $name, $time, $value) = @_;
-    # value が数値でない場合は 0 に落として不正JSONを防ぐ
     $value = 0 unless defined $value && $value =~ /^-?[\d\.]+$/;
     return sprintf('{"hostId":"%s","name":"%s","time":%d,"value":%s}',
         $host_id, $name, $time, $value);
@@ -336,12 +279,9 @@ sub metric_json {
 
 # ================================================================
 # 【PHASE 1】ホストID の確保
-#   IDファイルが存在して有効なID → isRetired チェック後に使用
-#   IDファイルが存在しない or 空  → Mackerel API に POST して新規登録
 # ================================================================
 my $host_id = '';
 
-# IDファイルが存在すれば読み込む
 if (-f $ID_FILE && -s $ID_FILE) {
     open(my $fh, '<', $ID_FILE) or die "Cannot open $ID_FILE: $!\n";
     $host_id = <$fh>; chomp $host_id; close $fh;
@@ -349,13 +289,7 @@ if (-f $ID_FILE && -s $ID_FILE) {
 }
 
 if ($host_id) {
-    # --- 既存ホスト: IDファイルから取得済み ---
     print "Loaded Host ID: $host_id\n";
-
-    # --- isRetired チェック: 退役済みホストへの送信を防止 ---
-    # 自動再登録は行わない。意図せず課金対象ホストが増えるリスクを避けるため。
-    # 対処: Mackerel コンソールで退役を解除するか、$ID_FILE を削除して再起動する。
-    # 起動直後のDNS解決・疎通が整うまで最大3回リトライしてから諦める
     print "Checking host status on Mackerel...\n";
     my ($get_code, $get_res) = (0, '');
     for my $attempt (1 .. 3) {
@@ -365,9 +299,6 @@ if ($host_id) {
         sleep(5);
     }
 
-    # 429: レート制限 (一時的) → 5xx 同様に warn で通過してループへ
-    # 5xx: サーバー側一時障害   → warn で通過してループへ
-    # その他4xx/3xx: 恒久的エラー → die
     if    ($get_code == 0)                         { die "[FATAL] Cannot reach Mackerel API after 3 attempts.\n" }
     elsif ($get_code == 404)                       { die "[FATAL] Host $host_id not found (404). $ID_FILE may be stale.\n"
                                                        . "  rm $ID_FILE && service mackerel_micro start\n" }
@@ -379,10 +310,8 @@ if ($host_id) {
     }
     print "Host is active.\n" if $get_code == 200;
 } else {
-    # --- 新規ホスト: POST /api/v0/hosts で登録 ---
     print "Host ID not found. Registering as a new host...\n";
 
-    # df -k を取得しておく(spec JSON にも使う)
     my %fs_for_register;
     for my $line (split(/\n/, run_cmd_safe(10, 'df', '-k') // '')) {
         next if $line =~ /^(?:Filesystem|devfs|procfs|linprocfs|fdescfs|tmpfs|nullfs)/;
@@ -400,12 +329,10 @@ if ($host_id) {
     my $spec_json = build_spec_json(%fs_for_register);
     my ($post_code, $post_res) = send_https_request('POST', '/api/v0/hosts', $spec_json);
 
-    # 新規登録は200系以外すべて致命的エラー（IDが取れないまま続行できないため5xxもdie）
     die "[FATAL] Host registration failed (${post_code}). API response:\n$post_res\n"
         unless $post_code == 200 && $post_res =~ /"id"\s*:\s*"([^"]+)"/;
     $host_id = $1;
 
-    # IDファイルのディレクトリを自動作成
     (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
     mkdir $id_dir or die "Cannot create directory $id_dir: $!\n"
         if $id_dir && ! -d $id_dir;
@@ -414,11 +341,6 @@ if ($host_id) {
     print $fh $host_id; close $fh;
     print "New host registered! Host ID: $host_id (saved to $ID_FILE)\n";
 }
-
-# ----------------------------------------------------------------
-# ループ外で固定値をキャッシュ (fork削減)
-# ----------------------------------------------------------------
-my $core_count = ((run_cmd_safe(2, 'sysctl', '-n', 'hw.ncpu') // '1') + 0) || 1;
 
 # ================================================================
 # 【PHASE 2】定期メトリック送信ループ
@@ -467,7 +389,7 @@ while (1) {
     push @metrics,
         metric_json($host_id, "memory.total",    $now, $page_count * $page_size),
         metric_json($host_id, "memory.free",     $now, ($free_cnt + $inact_cnt + $laund_cnt) * $page_size),
-        metric_json($host_id, "memory.used",     $now, ($wire_cnt + $active_cnt)              * $page_size),
+        metric_json($host_id, "memory.used",     $now, ($wire_cnt + $active_cnt)             * $page_size),
         metric_json($host_id, "memory.active",   $now, $active_cnt * $page_size),
         metric_json($host_id, "memory.inactive", $now, $inact_cnt  * $page_size);
 
@@ -481,34 +403,30 @@ while (1) {
     }
 
     # --- [4] ネットワーク ---
+    # 【修正】初回実行時（prevが存在しない時）のゼロ送信を防止
     my %current_net;
     for my $line (split(/\n/, run_cmd_safe(5, 'netstat', '-bni') // '')) {
         next if $line =~ /^(?:Name|lo|plip)/ || $line =~ /Link/;
         my @cols = split(/\s+/, $line);
         my ($iface, $rx, $tx) = ($cols[0], $cols[7], $cols[10]);
         next unless defined($rx) && defined($tx) && $iface !~ /\*/;
-        next if $ignore_iface{$iface};    # IGNORE_INTERFACES フィルター
+        next if $ignore_iface{$iface};
 
         $current_net{$iface} = { rx => $rx, tx => $tx };
 
-        my ($d_rx, $d_tx) = (0, 0);
         if (exists $prev_net{$iface}) {
-            $d_rx = $rx - $prev_net{$iface}{rx} if $rx >= $prev_net{$iface}{rx};
-            $d_tx = $tx - $prev_net{$iface}{tx} if $tx >= $prev_net{$iface}{tx};
+            my $d_rx = $rx >= $prev_net{$iface}{rx} ? $rx - $prev_net{$iface}{rx} : 0;
+            my $d_tx = $tx >= $prev_net{$iface}{tx} ? $tx - $prev_net{$iface}{tx} : 0;
+            push @metrics,
+                metric_json($host_id, "interface.${iface}.rxBytes.delta", $now, $d_rx),
+                metric_json($host_id, "interface.${iface}.txBytes.delta", $now, $d_tx);
         }
-        push @metrics,
-            metric_json($host_id, "interface.${iface}.rxBytes.delta", $now, $d_rx),
-            metric_json($host_id, "interface.${iface}.txBytes.delta", $now, $d_tx);
     }
 
     # --- [5] ディスク使用量 ---
-    # IGNORE_FS_TYPES: df -k にはfstype列がないため mount コマンドで補完する。
-    # dfループの外で1回だけ実行してハッシュにキャッシュ → ループ内は O(1) ルックアップ。
-    # マウントポイント数が多くても fork は1回で済む。
     my %mount_fstype;
     if (%ignore_fstype) {
         for my $mline (split(/\n/, run_cmd_safe(5, 'mount') // '')) {
-            # 書式: /dev/ada0s1a on /mnt (ufs, local, ...)
             if ($mline =~ /^\S+\s+on\s+(.+?)\s+\((\w+)/) {
                 $mount_fstype{$1} = $2;
             }
@@ -521,8 +439,8 @@ while (1) {
         next unless $line =~ /^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(\S+)/;
 
         my ($dev_raw, $total_kb, $used_kb, $avail_kb, $pct, $mount) = ($1,$2,$3,$4,$5,$6);
-        next if $ignore_mount{$mount};                                    # IGNORE_FILESYSTEMS
-        next if %ignore_fstype && $ignore_fstype{ $mount_fstype{$mount} // '' };  # IGNORE_FS_TYPES
+        next if $ignore_mount{$mount};
+        next if %ignore_fstype && $ignore_fstype{ $mount_fstype{$mount} // '' };
         (my $dev_clean = $dev_raw) =~ s{^/dev/}{};
         $dev_clean =~ s{[^\w\-\.]+}{-}g;
         $dev_clean =~ s{^-|-$}{}g;
@@ -540,26 +458,23 @@ while (1) {
         };
     }
 
-    # ----------------------------------------------------------------
-    # [6] スワップ情報 (swapinfo)
-    # Mackerel標準仕様に準拠し memory.swap_total / memory.swap_free をByte単位で収集。
-    # 複数スワップ構成（マルチスワップ）時もループで正確に全デバイスの合計値を算出。
-    # 2秒の alarm 保護 ＋ WNOHANG によるノンブロッキング回収でハング時も安全にスキップ。
-    # ----------------------------------------------------------------
+    # --- [6] スワップ情報 (swapinfo) ---
     {
         my ($swap_pid, $swap_fh);
         my ($swap_total, $swap_free) = (0, 0);
         eval {
-            local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+            local $SIG{ALRM} = sub { 
+                kill('KILL', $swap_pid) if defined $swap_pid; 
+                die "TIMEOUT\n"; 
+            };
             alarm(2);
 
             $swap_pid = open($swap_fh, '-|', 'swapinfo', '-k')
                 or die "swapinfo open failed: $!\n";
 
             while (my $line = <$swap_fh>) {
-                # 出力例: /dev/gpt/swapfs   2097148     0  2097148     0%
                 if ($line =~ /\s+(\d+)\s+\d+\s+(\d+)\s+\d+%/) {
-                    $swap_total += $1 * 1024; # KB -> Byte換算
+                    $swap_total += $1 * 1024;
                     $swap_free  += $2 * 1024;
                 }
             }
@@ -578,18 +493,18 @@ while (1) {
             } else {
                 warn "[WARN] swapinfo failed: $@";
             }
-            reap_timed_out_child($swap_pid, 'KILL'); # Dステート対策
+            reap_timed_out_child($swap_pid, 'KILL');
         }
     }
 
     # --- [7] ディスク I/O ---
-    # iostat -x -c 2 -w 1 は正常時約1秒で終わるため alarm(3) で余裕を持たせる。
-    # タイムアウト時は reap_timed_out_child() でノンブロッキング回収し、
-    # ディスク I/O メトリクスだけ欠落させて次のループへ継続する。
     {
         my ($iostat_pid, $iostat_fh);
         eval {
-            local $SIG{ALRM} = sub { die "TIMEOUT\n" };
+            local $SIG{ALRM} = sub { 
+                kill('KILL', $iostat_pid) if defined $iostat_pid; 
+                die "TIMEOUT\n"; 
+            };
             alarm(3);
 
             $iostat_pid = open($iostat_fh, '-|', 'iostat', '-x', '-c', '2', '-w', '1')
@@ -598,7 +513,7 @@ while (1) {
             my $capture = 0;
             while (my $line = <$iostat_fh>) {
                 if ($line =~ /extended device statistics/i) {
-                    $capture = 1; <$iostat_fh>; next;    # ヘッダースキップ
+                    $capture = 1; <$iostat_fh>; next;
                 }
                 next unless $capture;
                 my @cols = split(/\s+/, $line);
@@ -607,13 +522,13 @@ while (1) {
                     ? @cols[1,2,3]
                     : @cols[0,1,2];
                 next unless $dev && $r_s =~ /^[\d\.]+$/;
-                next if $ignore_disk{$dev};    # IGNORE_DISKS フィルター
+                next if $ignore_disk{$dev};
                 push @metrics,
                     metric_json($host_id, "disk.$dev.reads.delta",  $now, $r_s),
                     metric_json($host_id, "disk.$dev.writes.delta", $now, $w_s);
             }
             close $iostat_fh;
-            $iostat_pid = undef;    # 正常終了時は PID をクリア
+            $iostat_pid = undef;
             alarm(0);
         };
         alarm(0);
@@ -632,11 +547,7 @@ while (1) {
     my $payload = "[" . join(',', @metrics) . "]";
     my ($post_code, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
 
-    # 0/429/5xx: 一時的な不調 → warn してスキップ・次インターバルで自動回復
-    # 429 (Too Many Requests) は RFC 6585 上「一時的」なため retry 対象とする
-    # 3xx/4xx(429除く): 恒久的エラー → die してデーモン終了
-    # ※スペックPUT(初回のみ・補助的処理)は4xxでも warn 継続 (下記[10]参照)
-    if    ($post_code == 200)                              { }  # 正常
+    if    ($post_code == 200)                              { }
     elsif ($post_code == 0 || $post_code == 429
                            || $post_code >= 500)           { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
     else                                                   { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
@@ -645,8 +556,6 @@ while (1) {
     %prev_net = %current_net if $post_code == 200;
 
     # --- [10] 初回のみホストスペック PUT ---
-    # 補助的な1回限りの処理のため、失敗しても warn で継続する（メトリック送信は継続できる）
-    # メトリックPOSTと異なり4xxでも die しない設計（意図的な差異）
     if ($loop_count == 1) {
         my $spec_json  = build_spec_json(%fs_meta);
         my ($put_code) = send_https_request('PUT', "/api/v0/hosts/$host_id", $spec_json);
