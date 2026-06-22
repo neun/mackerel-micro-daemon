@@ -22,7 +22,7 @@ jobs:
           # vmactions での環境変数の引き渡し方
           envs: 'GIT_TAG'
           release: '14.0'
-          sync: false
+          sync: 'off'
           # 実行するコマンド
           run: |
             echo "--- FreeBSD VM Started ---"
