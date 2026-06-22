@@ -10,7 +10,7 @@ warn()    { printf "${YELLOW}[WARN]${RESET}  %s\n" "$*"; }
 section() { printf "\n${BOLD}==> %s${RESET}\n" "$*"; }
 
 if [ "$(id -u)" -ne 0 ]; then
-    printf "${RED}[ERROR]${RESET} root で実行してください。\n" >&2; exit 1
+    printf '%s\n' "${RED}[ERROR]${RESET} root で実行してください。" >&2; exit 1
 fi
 
 section "サービスの停止"
@@ -20,7 +20,9 @@ if service mackerel_micro status >/dev/null 2>&1; then
 fi
 
 section "起動設定の削除 (sysrc)"
-sysrc -x mackerel_micro_enable 2>/dev/null && info "mackerel_micro_enable を rc.conf から削除しました。" || true
+if sysrc -x mackerel_micro_enable 2>/dev/null; then
+    info "mackerel_micro_enable を rc.conf から削除しました。"
+fi
 
 section "ファイルの削除"
 for f in \
@@ -38,4 +40,4 @@ warn "  設定ファイル : /usr/local/etc/mackerel-micro/mackerel-micro.conf"
 warn "  ホスト ID    : /var/lib/mackerel-agent/id  (他のagentと共用の場合は特に注意)"
 warn "  ログ         : /var/log/messages 内 (syslog経由、grep mackerel-micro で検索可能)"
 
-printf "\n${GREEN}${BOLD}アンインストール完了。${RESET}\n"
+printf '\n%s\n' "${GREEN}${BOLD}アンインストール完了。${RESET}"
