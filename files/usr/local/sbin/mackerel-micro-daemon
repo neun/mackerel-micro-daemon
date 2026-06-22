@@ -45,10 +45,10 @@ my $ID_FILE  = $ENV{MACKEREL_ID_FILE} // '/var/lib/mackerel-agent/id';
 # ----------------------------------------------------------------
 # 収集除外フィルター
 # ----------------------------------------------------------------
-my %ignore_iface   = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_INTERFACES}  // '');
-my %ignore_disk    = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_DISKS}       // '');
-my %ignore_mount   = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_FILESYSTEMS} // '');
-my %ignore_fstype  = map { s/^\s+|\s+$//gr => 1 } split(//, $ENV{IGNORE_FS_TYPES}    // '');
+my %ignore_iface   = map { s/^\s+|\s+$//gr => 1 } split(/,/, $ENV{IGNORE_INTERFACES}  // '');
+my %ignore_disk    = map { s/^\s+|\s+$//gr => 1 } split(/,/, $ENV{IGNORE_DISKS}       // '');
+my %ignore_mount   = map { s/^\s+|\s+$//gr => 1 } split(/,/, $ENV{IGNORE_FILESYSTEMS} // '');
+my %ignore_fstype  = map { s/^\s+|\s+$//gr => 1 } split(/,/, $ENV{IGNORE_FS_TYPES}    // '');
 
 my @MEM_KEYS = qw(
     vm.stats.vm.v_page_size
