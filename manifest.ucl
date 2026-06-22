@@ -1,0 +1,33 @@
+name: "mackerel-micro-daemon"
+version: "0.0.0"
+origin: "sysutils/mackerel-micro-daemon"
+comment: "Micro Mackerel agent written in Perl for FreeBSD"
+desc: "A lightweight, zero-dependency alternative to mackerel-agent, optimized for FreeBSD systems."
+maintainer: "neun <your-email@example.com>"
+www: "https://github.com/neun/mackerel-micro-daemon"
+prefix: "/usr/local"
+categories: ["sysutils"]
+licenselogic: "single"
+licenses: ["MIT"]
+abi: "FreeBSD:*:*"
+osversion: 0
+
+deps: {
+    perl5: {
+        origin: "lang/perl5",
+        version: "5.16.0"
+    }
+}
+
+files: {
+    /usr/local/sbin/mackerel-micro-daemon: {
+        perm: "0755"
+    }
+    /usr/local/etc/rc.d/mackerel_micro: {
+        perm: "0755"
+    }
+    /usr/local/etc/mackerel-micro/mackerel-micro.conf.sample: {
+        type: "sample"
+        perm: "0644"
+    }
+}

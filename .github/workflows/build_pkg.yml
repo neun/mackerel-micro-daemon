@@ -1,0 +1,58 @@
+name: Build FreeBSD Package
+
+on:
+  workflow_dispatch: # 手動起動ボタン
+  push:
+    tags:
+      - 'v*' # タグ起動（v1.0.0 など）
+
+jobs:
+  build-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. コードの取得
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      # 2. 本物の FreeBSD VM を使ってパッケージをビルド
+      - name: Build package inside FreeBSD VM
+        uses: vmactions/freebsd-vm@v1.4.8
+        with:
+          # vmactions での環境変数の引き渡し方
+          envs: 'GIT_TAG'
+          # 実行するコマンド
+          run: |
+            echo "--- FreeBSD VM Started ---"
+            
+            # 1. タグから「v」を除去
+            if [ -z "$GIT_TAG" ] || [ "$GIT_TAG" = "main" ] || [ "$GIT_TAG" = "master" ]; then
+              VERSION="0.0.0-snapshot"
+            else
+              VERSION="${GIT_TAG#v}"
+            fi
+            
+            echo "Target Version: $VERSION"
+            
+            # 2. manifest.ucl のバージョンを書き換え
+            sed -i '' "s/version: \".*\"/version: \"$VERSION\"/" manifest.ucl
+            
+            # 確認
+            head -n 5 manifest.ucl
+            
+            # 3. pkg create の実行
+            echo "Running pkg create..."
+            pkg create -m . -r files/ -o .
+            
+            echo "--- Build Completed ---"
+        # 外側の Ubuntu 環境に `GIT_TAG` を用意して VM 内へ引き渡す
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+
+      # 3. 生成された .pkg ファイルを Artifact として保存
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-package
+          path: '*.pkg'
+          retention-days: 7
