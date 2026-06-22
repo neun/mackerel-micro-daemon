@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  syntax-check:
+  perl-check:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,6 +22,13 @@ jobs:
       - name: Run Perl syntax check
         run: |
           perl -c files/usr/local/sbin/mackerel-micro-daemon
+
+  shell-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
 
       - name: Run ShellCheck
         run: |
