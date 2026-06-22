@@ -22,3 +22,14 @@ jobs:
       - name: Run syntax check
         run: |
           perl -c files/usr/local/sbin/mackerel-micro-daemon
+  shell-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck files/usr/local/etc/rc.d/mackerel_micro
+          shellcheck install.sh
+          shellcheck uninstall.sh
