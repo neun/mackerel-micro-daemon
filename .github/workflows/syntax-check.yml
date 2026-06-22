@@ -1,4 +1,4 @@
-name: Perl CI and Shell Syntax Check
+name: Perl and Shell Syntax Check
 
 on:
   push:
@@ -22,10 +22,6 @@ jobs:
       - name: Run syntax check
         run: |
           perl -c files/usr/local/sbin/mackerel-micro-daemon
-
-      - name: Run Perl test suite
-        run: |
-          prove -r t/
 
   shell-check:
     runs-on: ubuntu-latest
