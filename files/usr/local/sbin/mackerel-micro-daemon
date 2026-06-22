@@ -6,7 +6,7 @@ use Time::HiRes qw(sleep);
 use POSIX qw(WNOHANG);
 
 # =================================================================
-# mackerel-micro-daemon.pl
+# mackerel-micro-daemon
 # FreeBSD 標準機能 + Perl 標準モジュールのみ。外部CPANモジュール不要。
 # =================================================================
 
@@ -14,7 +14,7 @@ use POSIX qw(WNOHANG);
 # 【STEP 0】設定ファイル / 環境変数からAPIキーを読み込む
 #
 # 優先順位:
-#   1. 環境変数 (export や systemd の EnvironmentFile= で渡す場合)
+#   1. 環境変数 (sh 系: export、csh/tcsh 系: setenv で渡す場合)
 #   2. 設定ファイル (デフォルト: /usr/local/etc/mackerel-micro/mackerel-micro.conf)
 #      コマンドライン引数で別パスを指定可: perl mackerel-micro-daemon.pl /path/to/conf
 #
@@ -116,7 +116,7 @@ sub reap_timed_out_child {
 # ----------------------------------------------------------------
 sub json_escape {
     my ($s) = @_;
-    $s =~ s{\\}{\\\\}g;   # \ → \
+    $s =~ s{\\}{\\\\}g;   # \ → \\ (バックスラッシュ1個 → JSON用2個)
     $s =~ s{"}{\\"}g;         # " → \"
     $s =~ s{\n}{\\n}g;       # LF
     $s =~ s{\r}{\\r}g;       # CR
@@ -169,7 +169,7 @@ sub sysctl_multi {
 
 # ----------------------------------------------------------------
 # HTTPS送信ヘルパー (PUT / POST 共通、タイムアウト保護付き)
-# open2 で openssl s_client に直接書き込む → シェルメタ文字に依存しない
+# open2 で openssl s_client を起動し、リクエストを stdin に直接書き込む
 # 【セキュリティ上のトレードオフ・意図的な選択】
 # openssl s_client は証明書検証エラーが出てもハンドシェイクを継続する(MITM耐性なし)。
 # -verify_return_error + ca_root_nss で検証を強制することも可能だが、
@@ -509,7 +509,7 @@ while (1) {
     # [6] スワップ情報 (swapinfo)
     # Mackerel標準仕様に準拠し memory.swap_total / memory.swap_free をByte単位で収集。
     # 複数スワップ構成（マルチスワップ）時もループで正確に全デバイスの合計値を算出。
-    # 2秒の alarm 保護 ＋ WNOHANG によるノンブロッキング回収でハングを完全防衛。
+    # 2秒の alarm 保護 ＋ WNOHANG によるノンブロッキング回収でハング時も安全にスキップ。
     # ----------------------------------------------------------------
     {
         my ($swap_pid, $swap_fh);
@@ -600,7 +600,7 @@ while (1) {
     # 0/429/5xx: 一時的な不調 → warn してスキップ・次インターバルで自動回復
     # 429 (Too Many Requests) は RFC 6585 上「一時的」なため retry 対象とする
     # 3xx/4xx(429除く): 恒久的エラー → die してデーモン終了
-    # ※スペックPUT(初回のみ・補助的処理)は4xxでも warn 継続 (下記[7]参照)
+    # ※スペックPUT(初回のみ・補助的処理)は4xxでも warn 継続 (下記[10]参照)
     if    ($post_code == 200)                              { }  # 正常
     elsif ($post_code == 0 || $post_code == 429
                            || $post_code >= 500)           { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
@@ -627,6 +627,7 @@ while (1) {
     if ($sleep_sec > 0) {
         sleep($sleep_sec);
     } else {
-        warn "Warning: loop took ${elapsed}s (>60s), skipping sleep.";
+        warn "[WARN] loop took ${elapsed}s (>60s), skipping sleep.
+";
     }
 }
