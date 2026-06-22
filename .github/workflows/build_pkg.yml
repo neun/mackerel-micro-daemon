@@ -52,7 +52,7 @@ jobs:
 
       # 3. 生成された .pkg ファイルを Artifact として保存
       - name: Upload Package Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: freebsd-package
           path: '*.pkg'
