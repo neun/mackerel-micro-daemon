@@ -275,7 +275,7 @@ jobs:
 
             echo "Target Version: ${VERSION}"
 
-            sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/" manifest.ucl
+            perl -i -pe 's/version: ".*?"/version: "'"${VERSION}"'"/ && $done++ if !$done' manifest.ucl
             head -n 5 manifest.ucl
 
             pkg create -m ./manifest.ucl -r files/ -o .
