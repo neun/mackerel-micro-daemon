@@ -212,8 +212,8 @@ jobs:
                 my $j = JSON::PP->new->decode(join "", <STDIN>);
                 print $j->{host}{isRetired} // "unknown";
               ')
-            if [ "${RETIRED_STATUS}" != "true" ]; then
-              echo "❌ Error: Expected host status 'retired', got '${RETIRED_STATUS}'"
+            if [ "${RETIRED_STATUS}" != "1" ]; then
+              echo "❌ Error: Expected host isRetired '1', got '${RETIRED_STATUS}'"
               dump_log
               exit 1
             fi
@@ -229,7 +229,7 @@ jobs:
             # デーモンは退役したホストへの POST で 404 を受け取り自動停止するが
             # 念のため 75 秒待ってタイムスタンプが変わっていないことを確認
             echo "Waiting 75 seconds to confirm metrics transmission has stopped..."
-            sleep 75
+            sleep 120
 
             TS_RETIRED=$(curl -sf \
               -H "X-Api-Key: ${MACKEREL_API_KEY}" \
