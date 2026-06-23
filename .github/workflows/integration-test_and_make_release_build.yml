@@ -1,24 +1,27 @@
-name: Mackerel Micro Daemon Integration Test
+name: Mackerel Micro Daemon CI
 
-# 手動実行のみ（GitHub の Actions タブから起動）
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
-  integration-test:
-    name: Run Test Suite on FreeBSD VM
+  # ===========================================================================
+  # Job 1: インテグレーションテスト + パッケージビルド（同一 FreeBSD VM）
+  # ===========================================================================
+  test-and-build:
+    name: Test and Build on FreeBSD VM
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Full Integration Test Suite inside FreeBSD VM
+      - name: Run Integration Test and Build Package inside FreeBSD VM
         uses: vmactions/freebsd-vm@v1.4.8
         with:
-          # envs: でVM内のシェル環境に引き渡す変数名を列挙する。
-          # env: は with: の外側 (step レベル) に置くこと。
-          envs: 'MACKEREL_API_KEY'
+          envs: 'MACKEREL_API_KEY GIT_TAG'
           release: '14.4'
           run: |
             set -e
@@ -27,7 +30,6 @@ jobs:
             CONF_FILE="/usr/local/etc/mackerel-micro/mackerel-micro.conf"
             HOSTID_FILE="/var/lib/mackerel-agent/id"
 
-            # エラー時に /var/log/messages の末尾を表示するヘルパー関数
             dump_log() {
               echo "--- /var/log/messages (tail -30) ---"
               tail -30 /var/log/messages || echo "(ログが読めませんでした)"
@@ -54,22 +56,14 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Setup] Install and Start Daemon"
 
-            # FreeBSD 14 の base には perl5・curl は含まれないため先にインストール
-            # openssl は base の LibreSSL (/usr/bin/openssl) があるため不要
             pkg install -y perl5 curl
 
             chmod +x ./install.sh ./uninstall.sh
             ./install.sh
 
-            # /var/lib は FreeBSD 標準のディレクトリではないため存在しない。
-            # daemon の mkdir() は1階層しか作れないので親ディレクトリを事前に作成する。
-            mkdir -p "$(dirname ${HOSTID_FILE})"
-
-            # 設定ファイルに API キーを書き込む（install.sh がサンプルから生成した conf を上書き）
             echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
             chmod 0600 "${CONF_FILE}"
 
-            # 書き込み内容を確認（値はマスク表示）
             echo "✔ conf written: $(head -1 ${CONF_FILE} | sed 's/=.*/=***/')"
 
             service mackerel_micro start
@@ -81,8 +75,6 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 1] Host Registration"
 
-            # ホスト登録は初回起動時に即実行される（数秒以内）
-            # メトリクス初回送信は起動後 ~60 秒なので 75 秒待てば確実
             echo "Waiting 75 seconds for host registration and first metrics transmission..."
             sleep 75
 
@@ -95,9 +87,6 @@ jobs:
             HOST_ID=$(cat "${HOSTID_FILE}")
             echo "✔ Host registered. ID = ${HOST_ID}"
 
-            # ホストが退役していないことを isRetired で確認
-            # status フィールドは退役後も "working" のままなので使用しない
-            # JSON::PP の boolean は 1(true) / 0(false) として出力される
             IS_RETIRED=$(curl -sf \
               -H "X-Api-Key: ${MACKEREL_API_KEY}" \
               "${API_BASE}/hosts/${HOST_ID}" \
@@ -119,12 +108,10 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 2] Verify Initial Metrics"
 
-            # memory.used はシステムメトリクス（custom. プレフィックス不要）
             RESPONSE=$(curl -sf \
               -H "X-Api-Key: ${MACKEREL_API_KEY}" \
               "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used")
 
-            # 値が正数で届いているか、かつタイムスタンプを保存
             RESULT=$(echo "${RESPONSE}" | perl -MJSON::PP -e '
               my $j    = JSON::PP->new->decode(join "", <STDIN>);
               my $host = $ARGV[0];
@@ -142,7 +129,6 @@ jobs:
               exit 1
             fi
 
-            # タイムスタンプを後のテストで比較するために保存
             TS_BEFORE=$(echo "${RESULT}" | cut -d: -f2)
             echo "✔ Initial metrics confirmed. timestamp = ${TS_BEFORE}"
 
@@ -153,7 +139,6 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 3] Restart Daemon and Wait"
 
-            # rc.subr の run_rc_command が stop → start を自動処理する
             service mackerel_micro restart
 
             echo "Waiting 135 seconds for metrics transmission after restart..."
@@ -162,7 +147,7 @@ jobs:
             echo "::endgroup::"
 
             # -----------------------------------------------------------------
-            # [Test 4] 再起動後のメトリクス確認（タイムスタンプが更新されているか）
+            # [Test 4] 再起動後のメトリクス確認
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 4] Verify Metrics After Restart"
 
@@ -204,7 +189,6 @@ jobs:
               exit 1
             fi
 
-            # 退役後は isRetired=1(true) になる（status フィールドは変化しない）
             IS_RETIRED_AFTER=$(curl -sf \
               -H "X-Api-Key: ${MACKEREL_API_KEY}" \
               "${API_BASE}/hosts/${HOST_ID}" \
@@ -226,8 +210,6 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 6] Verify No New Metrics After Retire"
 
-            # デーモンは退役したホストへの POST で 404 を受け取り自動停止するが
-            # 念のため 120 秒待ってタイムスタンプが変わっていないことを確認
             echo "Waiting 120 seconds to confirm metrics transmission has stopped..."
             sleep 120
 
@@ -256,18 +238,14 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 7] Verify Fatal Error on Invalid HostID"
 
-            # デーモンは退役ホストの検出で既に停止しているはずだが念のため
             service mackerel_micro stop 2>/dev/null || true
             rm -f /var/run/mackerel_micro.pid
 
-            # 存在しない host_id を書き込んで起動し、[FATAL] を誘発する
             echo "INVALID_HOST_ID_FOR_TEST" > "${HOSTID_FILE}"
 
             service mackerel_micro start
-            # デーモンが [FATAL] を検出して die するまで待つ
             sleep 10
 
-            # ログに [FATAL] が出ていることを確認
             if ! grep -q '\[FATAL\]' /var/log/messages; then
               echo "❌ Error: Expected [FATAL] log message not found in /var/log/messages"
               dump_log
@@ -279,5 +257,64 @@ jobs:
 
             echo ""
             echo "🎉 All integration tests passed!"
+
+            # -----------------------------------------------------------------
+            # [Build] パッケージビルド
+            # -----------------------------------------------------------------
+            echo "::group::📦 [Build] Build FreeBSD Package"
+
+            # デーモンを停止してクリーンな状態でビルド
+            service mackerel_micro stop 2>/dev/null || true
+
+            # タグから「v」を除去、非タグ起動はスナップショット扱い
+            if [ -z "${GIT_TAG}" ] || [ "${GIT_TAG}" = "main" ] || [ "${GIT_TAG}" = "master" ]; then
+              VERSION="0.0.0-snapshot"
+            else
+              VERSION="${GIT_TAG#v}"
+            fi
+
+            echo "Target Version: ${VERSION}"
+
+            sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/" manifest.ucl
+            head -n 5 manifest.ucl
+
+            pkg create -m ./manifest.ucl -r files/ -o .
+
+            echo "--- Build Completed ---"
+            ls -lh ./*.pkg
+
+            echo "::endgroup::"
         env:
           MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
+          GIT_TAG: ${{ github.ref_name }}
+
+      - name: Upload Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-package
+          path: '*.pkg'
+          retention-days: 7
+
+  # ===========================================================================
+  # Job 2: GitHub Release（タグ起動かつビルド成功時のみ）
+  # ===========================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: test-and-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Package Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: freebsd-package
+
+      - name: Create GitHub Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.pkg'
+          generate_release_notes: true
+          draft: true

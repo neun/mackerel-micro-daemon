@@ -2,9 +2,9 @@ name: Build FreeBSD Package
 
 on:
   workflow_dispatch: # 手動起動ボタン
-  push:
-    tags:
-      - 'v*' # タグ起動（v1.0.0 など）
+#  push:
+#    tags:
+#      - 'v*' # タグ起動（v1.0.0 など）
 
 jobs:
   build-package:
