@@ -66,3 +66,5 @@ jobs:
           files: '*.pkg'
           # これを入れておくと、前回のリリースからの変更点（コミットログ）をGitHubが自動生成して説明文にしてくれます
           generate_release_notes: true
+          draft: true
+
