@@ -156,8 +156,8 @@ jobs:
 
             service mackerel_micro restart
 
-            echo "Waiting 145 seconds for metrics transmission after restart..."
-            sleep 145
+            echo "Waiting 185 seconds for metrics transmission after restart..."
+            sleep 185
 
             echo "::endgroup::"
 
