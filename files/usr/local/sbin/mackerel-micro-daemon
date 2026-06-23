@@ -588,7 +588,7 @@ while (1) {
     my $payload = "[" . join(',', @metrics) . "]";
     my ($post_code, $res) = send_https_request('POST', '/api/v0/tsdb', $payload);
 
-    if    ($post_code == 200)                              { }
+    if    ($post_code == 200)                              { print "Metrics sent successfully (loop=$loop_count, count=" . scalar(@metrics) . ").\n" }
     elsif ($post_code == 0 || $post_code == 429
                            || $post_code >= 500)           { warn "Metric post failed (${post_code}, loop=$loop_count). Will retry.\n" }
     else                                                   { die "[FATAL] Metric post rejected (${post_code}). Terminating daemon.\n" }
