@@ -90,7 +90,7 @@ MACKEREL_API_KEY=your_api_key_here
 # 任意: ホスト ID ファイルのパス (デフォルト: /var/lib/mackerel-agent/id)
 #MACKEREL_ID_FILE=/var/lib/mackerel-agent/id
 ```
-API キーは [Mackerel の組織設定ページ](https://mackerel.io/orgs/<YOUR-ORG-NAME>?tab=apikeys) から取得できます。
+API キーは [Mackerel の組織設定ページ](https://mackerel.io/my?tab=apikeys) から取得できます。
 
 
 ```sh
