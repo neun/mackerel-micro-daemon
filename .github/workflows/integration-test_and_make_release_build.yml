@@ -163,6 +163,14 @@ jobs:
             while [ "${ELAPSED}" -lt 180 ]; do
               sleep 15
               ELAPSED=$((ELAPSED + 15))
+
+              # プロセス生存確認
+              if ! kill -0 "$(cat /var/run/mackerel_micro.pid 2>/dev/null)" 2>/dev/null; then
+                echo "❌ Error: Daemon process is not running at ${ELAPSED}s."
+                dump_log
+                exit 1
+              fi
+
               TS_AFTER=$(curl -sf \
                 -H "X-Api-Key: ${MACKEREL_API_KEY}" \
                 "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used" \
@@ -175,7 +183,10 @@ jobs:
                 echo "✔ New metrics arrived after ${ELAPSED}s."
                 break
               fi
-              echo "  waiting... (${ELAPSED}s elapsed, ts=${TS_AFTER})"
+
+              # 診断: daemonログにメトリクス送信成功が出ているか確認
+              SENT=$(grep -c 'Metrics sent successfully' /var/log/messages 2>/dev/null || echo 0)
+              echo "  waiting... (${ELAPSED}s elapsed, ts=${TS_AFTER}, metrics_sent_log=${SENT})"
             done
 
             echo "::endgroup::"
