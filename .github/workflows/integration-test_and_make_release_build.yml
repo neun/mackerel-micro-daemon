@@ -34,6 +34,21 @@ jobs:
               echo "--- /var/log/messages (tail -30) ---"
               tail -30 /var/log/messages || echo "(ログが読めませんでした)"
               echo "------------------------------------"
+
+              # エラー終了時に登録済みホストが残らないよう退役処理を行う
+              # HOST_ID: インテグレーションテストで登録したホスト
+              # SMOKE_HOST_ID: Smoke Test で登録したホスト
+              for _retire_id in "${HOST_ID:-}" "${SMOKE_HOST_ID:-}"; do
+                [ -z "${_retire_id}" ] && continue
+                echo "Retiring host ${_retire_id} for cleanup..."
+                curl -sf -o /dev/null \
+                  -X POST \
+                  -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+                  -H "Content-Type: application/json" \
+                  "${API_BASE}/hosts/${_retire_id}/retire" \
+                  && echo "✔ Host ${_retire_id} retired." \
+                  || echo "⚠ Failed to retire host ${_retire_id} (may already be retired)."
+              done
             }
 
             # -----------------------------------------------------------------
@@ -141,8 +156,8 @@ jobs:
 
             service mackerel_micro restart
 
-            echo "Waiting 135 seconds for metrics transmission after restart..."
-            sleep 135
+            echo "Waiting 145 seconds for metrics transmission after restart..."
+            sleep 145
 
             echo "::endgroup::"
 
