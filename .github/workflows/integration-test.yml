@@ -156,8 +156,8 @@ jobs:
             # rc.subr の run_rc_command が stop → start を自動処理する
             service mackerel_micro restart
 
-            echo "Waiting 75 seconds for metrics transmission after restart..."
-            sleep 75
+            echo "Waiting 135 seconds for metrics transmission after restart..."
+            sleep 135
 
             echo "::endgroup::"
 
