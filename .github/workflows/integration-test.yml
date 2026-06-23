@@ -24,9 +24,15 @@ jobs:
             set -e
 
             API_BASE="https://api.mackerelio.com/api/v0"
-            # install.sh が配置する実際のパスに合わせる
             CONF_FILE="/usr/local/etc/mackerel-micro/mackerel-micro.conf"
             HOSTID_FILE="/var/lib/mackerel-agent/id"
+
+            # エラー時に /var/log/messages の末尾を表示するヘルパー関数
+            dump_log() {
+              echo "--- /var/log/messages (tail -30) ---"
+              tail -30 /var/log/messages || echo "(ログが読めませんでした)"
+              echo "------------------------------------"
+            }
 
             # -----------------------------------------------------------------
             # [Setup] インストールと起動
@@ -39,6 +45,10 @@ jobs:
 
             chmod +x ./install.sh ./uninstall.sh
             ./install.sh
+
+            # /var/lib は FreeBSD 標準のディレクトリではないため存在しない。
+            # daemon の mkdir() は1階層しか作れないので親ディレクトリを事前に作成する。
+            mkdir -p "$(dirname ${HOSTID_FILE})"
 
             # 設定ファイルのキー名は MACKEREL_API_KEY=
             echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
@@ -60,6 +70,7 @@ jobs:
 
             if [ ! -f "${HOSTID_FILE}" ]; then
               echo "❌ Error: Host ID file was not created at ${HOSTID_FILE}"
+              dump_log
               exit 1
             fi
 
@@ -76,6 +87,7 @@ jobs:
               ')
             if [ "${HOST_STATUS}" != "working" ]; then
               echo "❌ Error: Expected host status 'working', got '${HOST_STATUS}'"
+              dump_log
               exit 1
             fi
             echo "✔ Host status = ${HOST_STATUS}"
@@ -98,14 +110,15 @@ jobs:
               my $host = $ARGV[0];
               my $rec  = $j->{tsdbLatest}{$host}{"memory.used"};
               if (defined $rec && defined $rec->{value} && $rec->{value} > 0) {
-                print "OK:", $rec->{time};   # "OK:タイムスタンプ" を出力
+                print "OK:", $rec->{time};
               } else {
                 print "NG";
               }
             ' "${HOST_ID}")
 
-            if echo "${RESULT}" | grep -qv '^OK:'; then
+            if ! echo "${RESULT}" | grep -q '^OK:'; then
               echo "❌ Error: Initial metrics not found or invalid. Response: ${RESPONSE}"
+              dump_log
               exit 1
             fi
 
@@ -147,6 +160,7 @@ jobs:
             if [ "${TS_AFTER}" -le "${TS_BEFORE}" ]; then
               echo "❌ Error: Metrics timestamp did not advance after restart."
               echo "   before=${TS_BEFORE}  after=${TS_AFTER}"
+              dump_log
               exit 1
             fi
             echo "✔ Metrics updated after restart. timestamp ${TS_BEFORE} → ${TS_AFTER}"
@@ -166,6 +180,7 @@ jobs:
 
             if [ "${RETIRE_CODE}" != "200" ]; then
               echo "❌ Error: Retire API returned HTTP ${RETIRE_CODE}"
+              dump_log
               exit 1
             fi
 
@@ -179,6 +194,7 @@ jobs:
               ')
             if [ "${RETIRED_STATUS}" != "retired" ]; then
               echo "❌ Error: Expected host status 'retired', got '${RETIRED_STATUS}'"
+              dump_log
               exit 1
             fi
             echo "✔ Host ${HOST_ID} retired successfully."
@@ -208,6 +224,7 @@ jobs:
             if [ "${TS_RETIRED}" -gt "${TS_AFTER}" ]; then
               echo "❌ Error: Metrics are still being sent after host retirement!"
               echo "   after_restart=${TS_AFTER}  after_retire=${TS_RETIRED}"
+              dump_log
               exit 1
             fi
             echo "✔ No new metrics sent after retirement. timestamp unchanged at ${TS_RETIRED}"
@@ -215,29 +232,25 @@ jobs:
             echo "::endgroup::"
 
             # -----------------------------------------------------------------
-            # [Test 7] ホスト ID ファイル削除後の起動エラー確認
+            # [Test 7] 無効なホスト ID で起動した際の FATAL エラー確認
             # -----------------------------------------------------------------
-            echo "::group::✅ [Test 7] Verify Fatal Error on Missing HostID"
+            echo "::group::✅ [Test 7] Verify Fatal Error on Invalid HostID"
 
             # デーモンは退役ホストの検出で既に停止しているはずだが念のため
             service mackerel_micro stop 2>/dev/null || true
-
-            rm -f "${HOSTID_FILE}"
-
-            # pidfile も残っている可能性があるためクリア
             rm -f /var/run/mackerel_micro.pid
 
-            # 存在しない host_id を持つ新規 ID ファイルを作成してエラーを誘発
-            mkdir -p "$(dirname ${HOSTID_FILE})"
+            # 存在しない host_id を書き込んで起動し、[FATAL] を誘発する
             echo "INVALID_HOST_ID_FOR_TEST" > "${HOSTID_FILE}"
 
             service mackerel_micro start
-            # デーモンが FATAL を検出して終了するまで待つ（[FATAL] は即時 die）
+            # デーモンが [FATAL] を検出して die するまで待つ
             sleep 10
 
             # ログに [FATAL] が出ていることを確認
             if ! grep -q '\[FATAL\]' /var/log/messages; then
               echo "❌ Error: Expected [FATAL] log message not found in /var/log/messages"
+              dump_log
               exit 1
             fi
             echo "✔ Daemon correctly logged [FATAL] and exited on invalid Host ID."
