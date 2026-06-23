@@ -364,8 +364,11 @@ if ($host_id) {
 
     (my $id_dir = $ID_FILE) =~ s{/[^/]+$}{};
     if ($id_dir && ! -d $id_dir) {
-        # mkdir が競合しても既存ディレクトリなら問題なし
-        mkdir($id_dir) or (-d $id_dir) or die "Cannot create directory $id_dir: $!\n";
+        # File::Path::make_path で mkdir -p 相当（/var/lib のような親ディレクトリも再帰的に作成）
+        require File::Path;
+        File::Path::make_path($id_dir)
+            or (-d $id_dir)
+            or die "Cannot create directory $id_dir: $!\n";
     }
 
     open(my $fh, '>', $ID_FILE) or die "Cannot write $ID_FILE: $!\n";
