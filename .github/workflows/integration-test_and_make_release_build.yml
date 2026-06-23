@@ -315,7 +315,7 @@ jobs:
             service mackerel_micro stop 2>/dev/null || true
 
             # タグから「v」を除去、非タグ起動はスナップショット扱い
-            if [ -z "${GIT_TAG}" ] || [ "${GIT_TAG}" = "main" ] || [ "${GIT_TAG}" = "master" ]; then
+            if [ -z "${GIT_TAG}" ] || [ "${GIT_TAG}" = "main" ] || [ "${GIT_TAG}" = "master" ] || [ "${GIT_TAG}" = "ci/test" ]; then
               VERSION="0.0.0-snapshot"
             else
               VERSION="${GIT_TAG#v}"
