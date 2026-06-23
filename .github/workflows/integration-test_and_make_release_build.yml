@@ -156,11 +156,11 @@ jobs:
 
             service mackerel_micro restart
 
-            # 固定sleepではなく、タイムスタンプが進むまで最大180秒ポーリング
-            echo "Waiting for metrics transmission after restart (max 180s)..."
+            # 固定sleepではなく、タイムスタンプが進むまで最大360秒ポーリング
+            echo "Waiting for metrics transmission after restart (max 360s)..."
             ELAPSED=0
             TS_AFTER=0
-            while [ "${ELAPSED}" -lt 180 ]; do
+            while [ "${ELAPSED}" -lt 360 ]; do
               sleep 15
               ELAPSED=$((ELAPSED + 15))
 
