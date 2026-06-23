@@ -275,13 +275,71 @@ jobs:
 
             echo "Target Version: ${VERSION}"
 
-            perl -i -pe 's/version: ".*?"/version: "'"${VERSION}"'"/ && $done++ if !$done' manifest.ucl
+            sed -i '' "s/version: \".*\"/version: \"${VERSION}\"/" manifest.ucl
             head -n 5 manifest.ucl
 
             pkg create -m ./manifest.ucl -r files/ -o .
 
             echo "--- Build Completed ---"
             ls -lh ./*.pkg
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Smoke Test] pkg add → 起動確認 → pkg delete
+            # -----------------------------------------------------------------
+            echo "::group::🔍 [Smoke Test] Install Package and Verify"
+
+            PKG_FILE=$(ls ./*.pkg | head -1)
+            echo "Installing ${PKG_FILE}..."
+
+            # インテグレーションテストでインストール済みのファイルを先に削除
+            # uninstall.sh は conf・hostid を保護するため削除しない
+            ./uninstall.sh
+
+            # テスト7で退役済みのホスト ID が残っているため削除する
+            # このまま起動すると [FATAL] Host not found (404) で即終了してしまう
+            rm -f "${HOSTID_FILE}"
+
+            pkg add "${PKG_FILE}"
+
+            # pkg add で入ったデーモンを起動して新規ホスト登録まで確認
+            service mackerel_micro start
+
+            # 新規ホスト登録は起動直後に実行されるので 15 秒あれば十分
+            echo "Waiting 15 seconds for fresh host registration..."
+            sleep 15
+
+            # 新しい hostid が生成されていることを確認
+            if [ ! -f "${HOSTID_FILE}" ]; then
+              echo "❌ Error: Host ID file was not created after pkg add."
+              dump_log
+              exit 1
+            fi
+
+            SMOKE_HOST_ID=$(cat "${HOSTID_FILE}")
+
+            # プロセスが生きているか確認（pidfile が存在し、プロセスが動いていること）
+            if [ ! -f /var/run/mackerel_micro.pid ] || \
+               ! kill -0 "$(cat /var/run/mackerel_micro.pid)" 2>/dev/null; then
+              echo "❌ Error: Daemon exited unexpectedly after pkg add."
+              dump_log
+              exit 1
+            fi
+            echo "✔ Daemon is running and registered as new host. ID = ${SMOKE_HOST_ID}"
+
+            # 正常起動を確認したら停止・退役・アンインストール
+            service mackerel_micro stop
+
+            curl -sf -o /dev/null \
+              -X POST \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              -H "Content-Type: application/json" \
+              "${API_BASE}/hosts/${SMOKE_HOST_ID}/retire" || true
+
+            pkg delete -y mackerel-micro-daemon
+
+            echo "✔ Smoke test passed. Package uninstalled."
 
             echo "::endgroup::"
         env:
