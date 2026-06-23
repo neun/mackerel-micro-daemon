@@ -156,8 +156,27 @@ jobs:
 
             service mackerel_micro restart
 
-            echo "Waiting 185 seconds for metrics transmission after restart..."
-            sleep 185
+            # 固定sleepではなく、タイムスタンプが進むまで最大180秒ポーリング
+            echo "Waiting for metrics transmission after restart (max 180s)..."
+            ELAPSED=0
+            TS_AFTER=0
+            while [ "${ELAPSED}" -lt 180 ]; do
+              sleep 15
+              ELAPSED=$((ELAPSED + 15))
+              TS_AFTER=$(curl -sf \
+                -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+                "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used" \
+                | perl -MJSON::PP -e '
+                  my $j   = JSON::PP->new->decode(join "", <STDIN>);
+                  my $rec = $j->{tsdbLatest}{$ARGV[0]}{"memory.used"};
+                  print defined $rec ? $rec->{time} : 0;
+                ' "${HOST_ID}")
+              if [ "${TS_AFTER}" -gt "${TS_BEFORE}" ]; then
+                echo "✔ New metrics arrived after ${ELAPSED}s."
+                break
+              fi
+              echo "  waiting... (${ELAPSED}s elapsed, ts=${TS_AFTER})"
+            done
 
             echo "::endgroup::"
 
@@ -225,6 +244,9 @@ jobs:
             # -----------------------------------------------------------------
             echo "::group::✅ [Test 6] Verify No New Metrics After Retire"
 
+            # 退役後120秒待つのではなく、タイムスタンプが変わらないことを確認しながら待つ
+            # 退役後もデーモンが1回分のメトリクスを送ってから止まる可能性があるため
+            # 2周期分(120秒)待ってからタイムスタンプを比較する
             echo "Waiting 120 seconds to confirm metrics transmission has stopped..."
             sleep 120
 
