@@ -1,0 +1,248 @@
+name: Mackerel Micro Daemon Integration Test
+
+# 手動実行のみ（GitHub の Actions タブから起動）
+on:
+  workflow_dispatch:
+
+jobs:
+  integration-test:
+    name: Run Test Suite on FreeBSD VM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Full Integration Test Suite inside FreeBSD VM
+        uses: vmactions/freebsd-vm@v1.4.8
+        env:
+          MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
+        with:
+          envs: 'MACKEREL_API_KEY'
+          release: '14.4'
+          run: |
+            set -e
+
+            API_BASE="https://api.mackerelio.com/api/v0"
+            # install.sh が配置する実際のパスに合わせる
+            CONF_FILE="/usr/local/etc/mackerel-micro/mackerel-micro.conf"
+            HOSTID_FILE="/var/lib/mackerel-agent/id"
+
+            # -----------------------------------------------------------------
+            # [Setup] インストールと起動
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Setup] Install and Start Daemon"
+
+            # FreeBSD 14 の base には perl5・curl は含まれないため先にインストール
+            # openssl は base の LibreSSL (/usr/bin/openssl) があるため不要
+            pkg install -y perl5 curl
+
+            chmod +x ./install.sh ./uninstall.sh
+            ./install.sh
+
+            # 設定ファイルのキー名は MACKEREL_API_KEY=
+            echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
+            chmod 0600 "${CONF_FILE}"
+
+            service mackerel_micro start
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 1] ホスト自動登録の確認
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 1] Host Registration"
+
+            # ホスト登録は初回起動時に即実行される（数秒以内）
+            # メトリクス初回送信は起動後 ~60 秒なので 75 秒待てば確実
+            echo "Waiting 75 seconds for host registration and first metrics transmission..."
+            sleep 75
+
+            if [ ! -f "${HOSTID_FILE}" ]; then
+              echo "❌ Error: Host ID file was not created at ${HOSTID_FILE}"
+              exit 1
+            fi
+
+            HOST_ID=$(cat "${HOSTID_FILE}")
+            echo "✔ Host registered. ID = ${HOST_ID}"
+
+            # ホストの status が working であることを API で確認
+            HOST_STATUS=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/hosts/${HOST_ID}" \
+              | perl -MJSON::PP -e '
+                my $j = JSON::PP->new->decode(join "", <STDIN>);
+                print $j->{host}{status} // "unknown";
+              ')
+            if [ "${HOST_STATUS}" != "working" ]; then
+              echo "❌ Error: Expected host status 'working', got '${HOST_STATUS}'"
+              exit 1
+            fi
+            echo "✔ Host status = ${HOST_STATUS}"
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 2] 初回メトリクス送信確認 + タイムスタンプ保存
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 2] Verify Initial Metrics"
+
+            # memory.used はシステムメトリクス（custom. プレフィックス不要）
+            RESPONSE=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used")
+
+            # 値が正数で届いているか、かつタイムスタンプを保存
+            RESULT=$(echo "${RESPONSE}" | perl -MJSON::PP -e '
+              my $j    = JSON::PP->new->decode(join "", <STDIN>);
+              my $host = $ARGV[0];
+              my $rec  = $j->{tsdbLatest}{$host}{"memory.used"};
+              if (defined $rec && defined $rec->{value} && $rec->{value} > 0) {
+                print "OK:", $rec->{time};   # "OK:タイムスタンプ" を出力
+              } else {
+                print "NG";
+              }
+            ' "${HOST_ID}")
+
+            if echo "${RESULT}" | grep -qv '^OK:'; then
+              echo "❌ Error: Initial metrics not found or invalid. Response: ${RESPONSE}"
+              exit 1
+            fi
+
+            # タイムスタンプを後のテストで比較するために保存
+            TS_BEFORE=$(echo "${RESULT}" | cut -d: -f2)
+            echo "✔ Initial metrics confirmed. timestamp = ${TS_BEFORE}"
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 3] デーモン再起動 + 次回送信待機
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 3] Restart Daemon and Wait"
+
+            # rc.subr の run_rc_command が stop → start を自動処理する
+            service mackerel_micro restart
+
+            echo "Waiting 75 seconds for metrics transmission after restart..."
+            sleep 75
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 4] 再起動後のメトリクス確認（タイムスタンプが更新されているか）
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 4] Verify Metrics After Restart"
+
+            RESPONSE2=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used")
+
+            TS_AFTER=$(echo "${RESPONSE2}" | perl -MJSON::PP -e '
+              my $j    = JSON::PP->new->decode(join "", <STDIN>);
+              my $host = $ARGV[0];
+              my $rec  = $j->{tsdbLatest}{$host}{"memory.used"};
+              print defined $rec ? $rec->{time} : 0;
+            ' "${HOST_ID}")
+
+            if [ "${TS_AFTER}" -le "${TS_BEFORE}" ]; then
+              echo "❌ Error: Metrics timestamp did not advance after restart."
+              echo "   before=${TS_BEFORE}  after=${TS_AFTER}"
+              exit 1
+            fi
+            echo "✔ Metrics updated after restart. timestamp ${TS_BEFORE} → ${TS_AFTER}"
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 5] ホスト退役
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 5] Retire Host"
+
+            RETIRE_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -X POST \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              -H "Content-Type: application/json" \
+              "${API_BASE}/hosts/${HOST_ID}/retire")
+
+            if [ "${RETIRE_CODE}" != "200" ]; then
+              echo "❌ Error: Retire API returned HTTP ${RETIRE_CODE}"
+              exit 1
+            fi
+
+            # 退役後は status=retired になる（404 にはならない）
+            RETIRED_STATUS=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/hosts/${HOST_ID}" \
+              | perl -MJSON::PP -e '
+                my $j = JSON::PP->new->decode(join "", <STDIN>);
+                print $j->{host}{status} // "unknown";
+              ')
+            if [ "${RETIRED_STATUS}" != "retired" ]; then
+              echo "❌ Error: Expected host status 'retired', got '${RETIRED_STATUS}'"
+              exit 1
+            fi
+            echo "✔ Host ${HOST_ID} retired successfully."
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 6] 退役後にメトリクスが送信されていないことを確認
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 6] Verify No New Metrics After Retire"
+
+            # デーモンは退役したホストへの POST で 404 を受け取り自動停止するが
+            # 念のため 75 秒待ってタイムスタンプが変わっていないことを確認
+            echo "Waiting 75 seconds to confirm metrics transmission has stopped..."
+            sleep 75
+
+            TS_RETIRED=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/tsdb/latest?hostId=${HOST_ID}&name=memory.used" \
+              | perl -MJSON::PP -e '
+                my $j    = JSON::PP->new->decode(join "", <STDIN>);
+                my $host = $ARGV[0];
+                my $rec  = $j->{tsdbLatest}{$host}{"memory.used"};
+                print defined $rec ? $rec->{time} : 0;
+              ' "${HOST_ID}")
+
+            if [ "${TS_RETIRED}" -gt "${TS_AFTER}" ]; then
+              echo "❌ Error: Metrics are still being sent after host retirement!"
+              echo "   after_restart=${TS_AFTER}  after_retire=${TS_RETIRED}"
+              exit 1
+            fi
+            echo "✔ No new metrics sent after retirement. timestamp unchanged at ${TS_RETIRED}"
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
+            # [Test 7] ホスト ID ファイル削除後の起動エラー確認
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Test 7] Verify Fatal Error on Missing HostID"
+
+            # デーモンは退役ホストの検出で既に停止しているはずだが念のため
+            service mackerel_micro stop 2>/dev/null || true
+
+            rm -f "${HOSTID_FILE}"
+
+            # pidfile も残っている可能性があるためクリア
+            rm -f /var/run/mackerel_micro.pid
+
+            # 存在しない host_id を持つ新規 ID ファイルを作成してエラーを誘発
+            mkdir -p "$(dirname ${HOSTID_FILE})"
+            echo "INVALID_HOST_ID_FOR_TEST" > "${HOSTID_FILE}"
+
+            service mackerel_micro start
+            # デーモンが FATAL を検出して終了するまで待つ（[FATAL] は即時 die）
+            sleep 10
+
+            # ログに [FATAL] が出ていることを確認
+            if ! grep -q '\[FATAL\]' /var/log/messages; then
+              echo "❌ Error: Expected [FATAL] log message not found in /var/log/messages"
+              exit 1
+            fi
+            echo "✔ Daemon correctly logged [FATAL] and exited on invalid Host ID."
+
+            echo "::endgroup::"
+
+            echo ""
+            echo "🎉 All integration tests passed!"
