@@ -505,6 +505,8 @@ while (1) {
                 or die "swapinfo open failed: $!\n";
 
             while (my $line = <$swap_fh>) {
+                # /dev/ で始まるデバイス行のみ集計（"Total" サマリ行を除外）
+                next unless $line =~ m{^/dev/};
                 if ($line =~ /\s+(\d+)\s+\d+\s+(\d+)\s+\d+%/) {
                     $swap_total += $1 * 1024;
                     $swap_free  += $2 * 1024;
@@ -544,9 +546,12 @@ while (1) {
                 or die "iostat open failed: $!\n";
 
             my $capture = 0;
+            my $block_count = 0;  # 何番目のブロックを読んでいるか
             while (my $line = <$iostat_fh>) {
                 if ($line =~ /extended device statistics/i) {
-                    $capture = 1; <$iostat_fh>; next;
+                    $block_count++;
+                    $capture = ($block_count >= 2) ? 1 : 0;  # 2回目以降のブロックのみ使用
+                    <$iostat_fh>; next;  # カラムヘッダ行をスキップ
                 }
                 next unless $capture;
                 my @cols = split(/\s+/, $line);

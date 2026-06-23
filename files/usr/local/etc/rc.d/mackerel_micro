@@ -52,7 +52,12 @@ mackerel_micro_stop()
     if [ -f "${pidfile}" ]; then
         pid=$(cat "${pidfile}")
         echo "Stopping ${name} (PID: ${pid})."
-        kill "${pid}" && rm -f "${pidfile}"
+        if kill "${pid}" 2>/dev/null; then
+            rm -f "${pidfile}"
+        else
+            echo "${name} process (PID: ${pid}) is not running. Removing stale pidfile."
+            rm -f "${pidfile}"
+        fi
     else
         echo "${name} is not running (no pidfile)."
     fi
