@@ -15,9 +15,11 @@ jobs:
 
       - name: Run Full Integration Test Suite inside FreeBSD VM
         uses: vmactions/freebsd-vm@v1.4.8
-        env:
-          MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
         with:
+          # envs: でVM内のシェル環境に引き渡す変数名を列挙する。
+          # 値は GitHub Actions の env コンテキストではなく secrets から
+          # ホスト側の環境変数として渡す必要があるため、
+          # env: は step レベルではなく with: の外側に置く。
           envs: 'MACKEREL_API_KEY'
           release: '14.4'
           run: |
@@ -35,6 +37,21 @@ jobs:
             }
 
             # -----------------------------------------------------------------
+            # [Preflight] 必須シークレットの存在確認
+            # -----------------------------------------------------------------
+            echo "::group::✅ [Preflight] Check Required Secrets"
+
+            if [ -z "${MACKEREL_API_KEY}" ]; then
+              echo "❌ Error: MACKEREL_API_KEY is empty."
+              echo "   GitHub リポジトリの Settings → Secrets → Actions に"
+              echo "   MACKEREL_API_KEY を登録してください。"
+              exit 1
+            fi
+            echo "✔ MACKEREL_API_KEY is set (length=${#MACKEREL_API_KEY})"
+
+            echo "::endgroup::"
+
+            # -----------------------------------------------------------------
             # [Setup] インストールと起動
             # -----------------------------------------------------------------
             echo "::group::✅ [Setup] Install and Start Daemon"
@@ -50,9 +67,12 @@ jobs:
             # daemon の mkdir() は1階層しか作れないので親ディレクトリを事前に作成する。
             mkdir -p "$(dirname ${HOSTID_FILE})"
 
-            # 設定ファイルのキー名は MACKEREL_API_KEY=
+            # 設定ファイルに API キーを書き込む（install.sh がサンプルから生成した conf を上書き）
             echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
             chmod 0600 "${CONF_FILE}"
+
+            # 書き込み内容を確認（値はマスク表示）
+            echo "✔ conf written: $(head -1 ${CONF_FILE} | sed 's/=.*/=***/')"
 
             service mackerel_micro start
 
@@ -259,3 +279,5 @@ jobs:
 
             echo ""
             echo "🎉 All integration tests passed!"
+        env:
+          MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
