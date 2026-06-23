@@ -352,7 +352,7 @@ jobs:
             pkg add "${PKG_FILE}"
 
             # pkg add で入ったデーモンを起動して新規ホスト登録まで確認
-            service mackerel_micro start
+            service mackerel_micro onestart
 
             # 新規ホスト登録は起動直後に実行されるので 15 秒あれば十分
             echo "Waiting 15 seconds for fresh host registration..."
@@ -377,7 +377,7 @@ jobs:
             echo "✔ Daemon is running and registered as new host. ID = ${SMOKE_HOST_ID}"
 
             # 正常起動を確認したら停止・退役・アンインストール
-            service mackerel_micro stop
+            service mackerel_micro onestop
 
             curl -sf -o /dev/null \
               -X POST \
