@@ -2,10 +2,12 @@ name: FreeBSD Multi-Version Package Install Test
 
 # ---------------------------------------------------------------------------
 # トリガー設定
-#   - 手動実行時に PKG_URL を指定できる
-#   - タグ push 時にも自動実行
+#   - リリース公開時に自動実行（アセットから .pkg を取得）
+#   - 手動実行時は PKG_URL を直接指定
 # ---------------------------------------------------------------------------
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       pkg_url:
@@ -14,13 +16,10 @@ on:
           例: https://github.com/<owner>/<repo>/releases/download/v1.2.3/mackerel-micro-daemon-1.2.3.pkg
         required: true
         type: string
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   # =========================================================================
-  # 並列テスト: FreeBSD 12.4 / 13.5 / 14.4 / 15.1
+  # 並列テスト: FreeBSD 13.5 / 14.4 / 15.1
   # matrix の各バージョンが独立した VM で同時実行される
   # =========================================================================
   pkg-install-test:
@@ -38,27 +37,40 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       # ----------------------------------------------------------------------
       # PKG_URL の決定
-      #   workflow_dispatch の入力値を優先し、
-      #   タグ push 時はそのタグの GitHub Release アセットを使う
+      #   release トリガー時: リリースアセット一覧から .pkg ファイルを検索
+      #   workflow_dispatch 時: 入力値をそのまま使用
       # ----------------------------------------------------------------------
       - name: Resolve pkg URL
         id: resolve_url
         shell: bash
         run: |
           if [ -n "${{ github.event.inputs.pkg_url }}" ]; then
+            # 手動実行: 入力値を使用
             echo "pkg_url=${{ github.event.inputs.pkg_url }}" >> "$GITHUB_OUTPUT"
+            echo "✔ Using manually specified URL: ${{ github.event.inputs.pkg_url }}"
           else
-            # タグ起動: refs/tags/v1.2.3 → v1.2.3 → 1.2.3
-            TAG="${{ github.ref_name }}"
-            VER="${TAG#v}"
-            URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/mackerel-micro-daemon-${VER}.pkg"
-            echo "pkg_url=${URL}" >> "$GITHUB_OUTPUT"
+            # リリーストリガー: アセット一覧から .pkg を探す
+            echo "Fetching assets for release: ${{ github.event.release.tag_name }}"
+
+            PKG_URL=$(curl -sf \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
+              | jq -r '.[] | select(.name | endswith(".pkg")) | .browser_download_url' \
+              | head -1)
+
+            if [ -z "${PKG_URL}" ]; then
+              echo "❌ Error: No .pkg asset found in release ${{ github.event.release.tag_name }}"
+              exit 1
+            fi
+
+            echo "pkg_url=${PKG_URL}" >> "$GITHUB_OUTPUT"
+            echo "✔ Found pkg URL: ${PKG_URL}"
           fi
-          echo "Resolved pkg URL: $(grep pkg_url "$GITHUB_OUTPUT")"
 
       # ----------------------------------------------------------------------
       # FreeBSD VM 内でテストを実行
