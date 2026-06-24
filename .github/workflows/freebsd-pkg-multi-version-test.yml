@@ -2,7 +2,7 @@ name: FreeBSD Multi-Version Package Install Test
 
 # ---------------------------------------------------------------------------
 # トリガー設定
-#   - 手動実行時に PKG_URL を指定できる（空欄なら後述のデフォルト値を使用）
+#   - 手動実行時に PKG_URL を指定できる
 #   - タグ push 時にも自動実行
 # ---------------------------------------------------------------------------
 on:
@@ -17,14 +17,6 @@ on:
   push:
     tags:
       - 'v*'
-
-# ---------------------------------------------------------------------------
-# 環境変数（全 job 共通）
-# ---------------------------------------------------------------------------
-env:
-  API_BASE: "https://api.mackerelio.com/api/v0"
-  CONF_FILE: "/usr/local/etc/mackerel-micro/mackerel-micro.conf"
-  HOSTID_FILE: "/var/lib/mackerel-agent/id"
 
 jobs:
   # =========================================================================
@@ -67,19 +59,29 @@ jobs:
             URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/mackerel-micro-daemon-${VER}.pkg"
             echo "pkg_url=${URL}" >> "$GITHUB_OUTPUT"
           fi
-          echo "Resolved pkg URL: $(cat "$GITHUB_OUTPUT" | grep pkg_url)"
+          echo "Resolved pkg URL: $(grep pkg_url "$GITHUB_OUTPUT")"
 
       # ----------------------------------------------------------------------
       # FreeBSD VM 内でテストを実行
+      # envs には VM に渡す変数名のみ列挙する（MACKEREL_API_KEY・PKG_URL のみ）
+      # API_BASE / CONF_FILE / HOSTID_FILE は run: 冒頭でシェル変数として定義し
+      # envs/env 経由の受け渡しに依存しない
       # ----------------------------------------------------------------------
       - name: "Test on FreeBSD ${{ matrix.freebsd_version }}"
         uses: vmactions/freebsd-vm@v1.4.8
         with:
           release: "${{ matrix.freebsd_version }}"
           envs: "MACKEREL_API_KEY PKG_URL"
-          # usesh: true にすると /bin/sh で実行される（デフォルトは bash 相当）
           run: |
             set -e
+
+            # ----------------------------------------------------------------
+            # VM 内で使うパス定数をシェル変数として定義
+            # （GitHub Actions の env: コンテキストは FreeBSD VM に届かないため）
+            # ----------------------------------------------------------------
+            API_BASE="https://api.mackerelio.com/api/v0"
+            CONF_FILE="/usr/local/etc/mackerel-micro/mackerel-micro.conf"
+            HOSTID_FILE="/var/lib/mackerel-agent/id"
 
             # ----------------------------------------------------------------
             # ヘルパー関数: エラー時にログを出力して HOST を退役
@@ -159,13 +161,15 @@ jobs:
 
             # ----------------------------------------------------------------
             # [Step 3] conf ファイルを書き込む
+            #   pkg add 時にディレクトリが作られるはずだが、
+            #   念のため mkdir -p で保証する
             # ----------------------------------------------------------------
             echo "::group::✅ [Step 3] Write Config"
 
-            mkdir -p "$(dirname ${CONF_FILE})"
+            mkdir -p "$(dirname "${CONF_FILE}")"
             echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
             chmod 0600 "${CONF_FILE}"
-            echo "✔ conf written: $(head -1 ${CONF_FILE} | sed 's/=.*/=***/')"
+            echo "✔ conf written: $(head -1 "${CONF_FILE}" | sed 's/=.*/=***/')"
 
             echo "::endgroup::"
 
@@ -302,6 +306,3 @@ jobs:
         env:
           MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
           PKG_URL: ${{ steps.resolve_url.outputs.pkg_url }}
-          API_BASE: ${{ env.API_BASE }}
-          CONF_FILE: ${{ env.CONF_FILE }}
-          HOSTID_FILE: ${{ env.HOSTID_FILE }}
