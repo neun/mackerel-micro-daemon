@@ -1,0 +1,307 @@
+name: FreeBSD Multi-Version Package Install Test
+
+# ---------------------------------------------------------------------------
+# トリガー設定
+#   - 手動実行時に PKG_URL を指定できる（空欄なら後述のデフォルト値を使用）
+#   - タグ push 時にも自動実行
+# ---------------------------------------------------------------------------
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_url:
+        description: |
+          テストする .pkg ファイルの URL
+          例: https://github.com/<owner>/<repo>/releases/download/v1.2.3/mackerel-micro-daemon-1.2.3.pkg
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+# ---------------------------------------------------------------------------
+# 環境変数（全 job 共通）
+# ---------------------------------------------------------------------------
+env:
+  API_BASE: "https://api.mackerelio.com/api/v0"
+  CONF_FILE: "/usr/local/etc/mackerel-micro/mackerel-micro.conf"
+  HOSTID_FILE: "/var/lib/mackerel-agent/id"
+
+jobs:
+  # =========================================================================
+  # 並列テスト: FreeBSD 12.4 / 13.5 / 14.4 / 15.1
+  # matrix の各バージョンが独立した VM で同時実行される
+  # =========================================================================
+  pkg-install-test:
+    name: "FreeBSD ${{ matrix.freebsd_version }} — pkg install test"
+    runs-on: ubuntu-latest
+
+    strategy:
+      # 1 バージョンが失敗しても他のバージョンを最後まで実行する
+      fail-fast: false
+      matrix:
+        freebsd_version:
+          - "12.4"
+          - "13.5"
+          - "14.4"
+          - "15.1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # PKG_URL の決定
+      #   workflow_dispatch の入力値を優先し、
+      #   タグ push 時はそのタグの GitHub Release アセットを使う
+      # ----------------------------------------------------------------------
+      - name: Resolve pkg URL
+        id: resolve_url
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.pkg_url }}" ]; then
+            echo "pkg_url=${{ github.event.inputs.pkg_url }}" >> "$GITHUB_OUTPUT"
+          else
+            # タグ起動: refs/tags/v1.2.3 → v1.2.3 → 1.2.3
+            TAG="${{ github.ref_name }}"
+            VER="${TAG#v}"
+            URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/mackerel-micro-daemon-${VER}.pkg"
+            echo "pkg_url=${URL}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved pkg URL: $(cat "$GITHUB_OUTPUT" | grep pkg_url)"
+
+      # ----------------------------------------------------------------------
+      # FreeBSD VM 内でテストを実行
+      # ----------------------------------------------------------------------
+      - name: "Test on FreeBSD ${{ matrix.freebsd_version }}"
+        uses: vmactions/freebsd-vm@v1.4.8
+        with:
+          release: "${{ matrix.freebsd_version }}"
+          envs: "MACKEREL_API_KEY PKG_URL"
+          # usesh: true にすると /bin/sh で実行される（デフォルトは bash 相当）
+          run: |
+            set -e
+
+            # ----------------------------------------------------------------
+            # ヘルパー関数: エラー時にログを出力して HOST を退役
+            # ----------------------------------------------------------------
+            dump_log_and_retire() {
+              echo "--- /var/log/messages (tail -50) ---"
+              tail -50 /var/log/messages 2>/dev/null || echo "(ログが読めませんでした)"
+              echo "------------------------------------"
+
+              if [ -n "${SMOKE_HOST_ID:-}" ]; then
+                echo "Retiring host ${SMOKE_HOST_ID} for cleanup..."
+                curl -sf -o /dev/null \
+                  -X POST \
+                  -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+                  -H "Content-Type: application/json" \
+                  "${API_BASE}/hosts/${SMOKE_HOST_ID}/retire" \
+                  && echo "✔ Host ${SMOKE_HOST_ID} retired." \
+                  || echo "⚠ Failed to retire host ${SMOKE_HOST_ID} (may already be retired)."
+              fi
+            }
+
+            # ----------------------------------------------------------------
+            # [Preflight] 必須シークレットの確認
+            # ----------------------------------------------------------------
+            echo "::group::✅ [Preflight] Check Required Secrets"
+
+            if [ -z "${MACKEREL_API_KEY}" ]; then
+              echo "❌ Error: MACKEREL_API_KEY is empty."
+              echo "   GitHub リポジトリの Settings → Secrets → Actions に"
+              echo "   MACKEREL_API_KEY を登録してください。"
+              exit 1
+            fi
+            echo "✔ MACKEREL_API_KEY is set (length=${#MACKEREL_API_KEY})"
+
+            if [ -z "${PKG_URL}" ]; then
+              echo "❌ Error: PKG_URL is empty."
+              exit 1
+            fi
+            echo "✔ PKG_URL = ${PKG_URL}"
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Setup] 依存パッケージ (curl, perl5) のインストール
+            #   perl5 は FreeBSD のベースシステムに含まれないため明示的にインストールする
+            # ----------------------------------------------------------------
+            echo "::group::✅ [Setup] Install Dependencies"
+
+            pkg install -y curl perl5
+
+            echo "✔ curl installed: $(curl --version | head -1)"
+            echo "✔ perl installed: $(perl --version | head -2 | tail -1)"
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Step 1] .pkg ファイルをダウンロード
+            # ----------------------------------------------------------------
+            echo "::group::📥 [Step 1] Download Package"
+
+            PKG_FILE="/tmp/mackerel-micro-daemon.pkg"
+            echo "Downloading ${PKG_URL} ..."
+            curl -fsSL -o "${PKG_FILE}" "${PKG_URL}"
+            ls -lh "${PKG_FILE}"
+            echo "✔ Package downloaded."
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Step 2] pkg add でインストール
+            # ----------------------------------------------------------------
+            echo "::group::📦 [Step 2] pkg add"
+
+            pkg add "${PKG_FILE}"
+            echo "✔ pkg add succeeded."
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Step 3] conf ファイルを書き込む
+            # ----------------------------------------------------------------
+            echo "::group::✅ [Step 3] Write Config"
+
+            mkdir -p "$(dirname ${CONF_FILE})"
+            echo "MACKEREL_API_KEY=${MACKEREL_API_KEY}" > "${CONF_FILE}"
+            chmod 0600 "${CONF_FILE}"
+            echo "✔ conf written: $(head -1 ${CONF_FILE} | sed 's/=.*/=***/')"
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Step 4] service onestart で起動
+            # ----------------------------------------------------------------
+            echo "::group::🚀 [Step 4] service onestart"
+
+            service mackerel_micro onestart
+            echo "✔ onestart completed."
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Test 1] ホスト自動登録の確認
+            #   起動直後にホスト登録が走るので 20 秒あれば十分なはずだが、
+            #   念のため最大 60 秒ポーリングする
+            # ----------------------------------------------------------------
+            echo "::group::✅ [Test 1] Host Registration"
+
+            ELAPSED=0
+            while [ "${ELAPSED}" -lt 60 ]; do
+              if [ -f "${HOSTID_FILE}" ]; then
+                break
+              fi
+              sleep 5
+              ELAPSED=$((ELAPSED + 5))
+              echo "  Waiting for host ID file... (${ELAPSED}s elapsed)"
+            done
+
+            if [ ! -f "${HOSTID_FILE}" ]; then
+              echo "❌ Error: Host ID file was not created at ${HOSTID_FILE}"
+              dump_log_and_retire
+              exit 1
+            fi
+
+            SMOKE_HOST_ID=$(cat "${HOSTID_FILE}")
+            echo "✔ Host registered. ID = ${SMOKE_HOST_ID}"
+
+            # Mackerel API でアクティブ (isRetired=0) であることを確認
+            IS_RETIRED=$(curl -sf \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              "${API_BASE}/hosts/${SMOKE_HOST_ID}" \
+              | perl -MJSON::PP -e '
+                my $j = JSON::PP->new->decode(join "", <STDIN>);
+                print $j->{host}{isRetired} ? "1" : "0";
+              ')
+            if [ "${IS_RETIRED}" != "0" ]; then
+              echo "❌ Error: Expected isRetired=0 (active), got isRetired=${IS_RETIRED}"
+              dump_log_and_retire
+              exit 1
+            fi
+            echo "✔ Host is active (isRetired=0)"
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Test 2] 初回メトリクス送信確認
+            #   最大 120 秒ポーリングして memory.used が届くのを待つ
+            # ----------------------------------------------------------------
+            echo "::group::✅ [Test 2] Verify Initial Metrics"
+
+            ELAPSED=0
+            METRICS_OK=0
+            while [ "${ELAPSED}" -lt 120 ]; do
+              sleep 15
+              ELAPSED=$((ELAPSED + 15))
+
+              RESPONSE=$(curl -sf \
+                -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+                "${API_BASE}/tsdb/latest?hostId=${SMOKE_HOST_ID}&name=memory.used" || echo "")
+
+              RESULT=$(echo "${RESPONSE}" | perl -MJSON::PP -e '
+                my $j    = JSON::PP->new->decode(join "", <STDIN>);
+                my $host = $ARGV[0];
+                my $rec  = $j->{tsdbLatest}{$host}{"memory.used"};
+                if (defined $rec && defined $rec->{value} && $rec->{value} > 0) {
+                  print "OK:", $rec->{time};
+                } else {
+                  print "NG";
+                }
+              ' "${SMOKE_HOST_ID}" 2>/dev/null || echo "NG")
+
+              if echo "${RESULT}" | grep -q '^OK:'; then
+                TS_FIRST=$(echo "${RESULT}" | cut -d: -f2)
+                echo "✔ Initial metrics confirmed at ${ELAPSED}s. timestamp = ${TS_FIRST}"
+                METRICS_OK=1
+                break
+              fi
+
+              echo "  Waiting for metrics... (${ELAPSED}s elapsed, result=${RESULT})"
+            done
+
+            if [ "${METRICS_OK}" != "1" ]; then
+              echo "❌ Error: Initial metrics not received within 120s."
+              dump_log_and_retire
+              exit 1
+            fi
+
+            echo "::endgroup::"
+
+            # ----------------------------------------------------------------
+            # [Teardown] デーモン停止 → ホスト退役 → pkg delete
+            # ----------------------------------------------------------------
+            echo "::group::🧹 [Teardown] Stop, Retire, Uninstall"
+
+            # デーモン停止 (onestart で起動したので onestop)
+            service mackerel_micro onestop || true
+            echo "✔ Daemon stopped."
+
+            # ホスト退役
+            RETIRE_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+              -X POST \
+              -H "X-Api-Key: ${MACKEREL_API_KEY}" \
+              -H "Content-Type: application/json" \
+              "${API_BASE}/hosts/${SMOKE_HOST_ID}/retire")
+
+            if [ "${RETIRE_CODE}" = "200" ]; then
+              echo "✔ Host ${SMOKE_HOST_ID} retired (HTTP 200)."
+            else
+              # 退役失敗はテスト失敗とみなさず警告のみ（VM は破棄されるため問題ない）
+              echo "⚠ Retire API returned HTTP ${RETIRE_CODE} for host ${SMOKE_HOST_ID}."
+            fi
+
+            # パッケージ削除
+            pkg delete -y mackerel-micro-daemon
+            echo "✔ Package uninstalled."
+
+            echo "::endgroup::"
+
+            echo ""
+            echo "🎉 All tests passed on FreeBSD ${{ matrix.freebsd_version }}!"
+
+        env:
+          MACKEREL_API_KEY: ${{ secrets.MACKEREL_API_KEY }}
+          PKG_URL: ${{ steps.resolve_url.outputs.pkg_url }}
+          API_BASE: ${{ env.API_BASE }}
+          CONF_FILE: ${{ env.CONF_FILE }}
+          HOSTID_FILE: ${{ env.HOSTID_FILE }}
